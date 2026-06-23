@@ -8,9 +8,15 @@ import warnings
 VarType = Literal["endo", "exo", "not_set"]
 Aggregation = Literal["sum", "product", "mean", "max", "min"]
 
+class DataContainer:
+    """
+    
+    """
+    def __init__(self, data : Any | None = None):
+        self.data = data 
 
 @dataclass
-class Var:
+class Var(DataContainer):
     """
     Represents a variable in the model.
     It has a name and a type, which can be either 'endo' (endogenous) or 'exo' (exogenous).
@@ -21,10 +27,14 @@ class Var:
     name: str
     type: VarType = "not_set"
     initial: float | None = None
-    value: float | Any = None
     range: tuple[float, float] | None = None
     aggregation: Aggregation | None = None
     unit: str | None = None
+
+
+    def __post_init__(self):
+        # add data
+        super().__init__()
 
     def __str__(self):
         return self.name
@@ -46,7 +56,7 @@ class VarTemp:
 
 
 @dataclass
-class Const:
+class Const(DataContainer):
     """
     Represents a constant parameter in the model.
 
@@ -56,7 +66,11 @@ class Const:
     value: float | Any = None
     range: tuple[float, float] | None = None
     unit: str | None = None
-
+    
+    # add data
+    def __post_init__(self):
+        super().__init__()
+    
     def __str__(self):
         return self.name
 
@@ -177,6 +191,21 @@ class EntityTemp():
         # pack them into a new Entity. Remember to set self as a parent template
         entity = Entity(*generated_data, name=name, template=self)
         return entity
+    def variables(self):
+        """
+        Returns a list of variable names in the template.
+        """
+        return [obj.name for obj in self._data if isinstance(obj, VarTemp)]
+    def constants(self):
+        """
+        Returns a list of constant names in the template.
+        """
+        return [obj.name for obj in self._data if isinstance(obj, ConstTemp)]
+    def params(self):
+        """
+        Returns a list of parameter names in the template.
+        """
+        return [obj.name for obj in self._data]
     def add(self, obj: VarTemp | ConstTemp):
         """
         Adds a variable or constant to the entity template.
@@ -186,6 +215,25 @@ class EntityTemp():
         else:
             raise ValueError(f"Argument {obj} is not a VarTemp or ConstTemp.")
     
+    @staticmethod
+    def inherits(entity_template: EntityTemp):
+        """
+        Creates an entity template from an existing template
+        All the data is copied, but the template is not linked to the entity.
+        """
+        new_template = EntityTemp(*entity_template._data)
+        return new_template
+
+@dataclass
+class D:
+    """
+    Time derivative of a variable. Used to define ODEs in the model.
+    """
+    var : Var | VarTemp 
+
+
+#class Eq:
+
 
 
 
