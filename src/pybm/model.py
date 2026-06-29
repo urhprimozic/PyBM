@@ -180,8 +180,10 @@ class EntityTemp():
     """
     Entity template. 
     """
-    def __init__(self, *args: VarTemp | ConstTemp):
-        self._data = args 
+    def __init__(self, *args: VarTemp | ConstTemp, parent : EntityTemp | None = None):
+        self._data = args
+        self.parent = parent
+
     def __call__(self, name: str | None = None):
         """
         Creates an Entity instance from the template. 
@@ -221,7 +223,7 @@ class EntityTemp():
         Creates an entity template from an existing template
         All the data is copied, but the template is not linked to the entity.
         """
-        new_template = EntityTemp(*entity_template._data)
+        new_template = EntityTemp(*entity_template._data, parent=entity_template)
         return new_template
 
 @dataclass
