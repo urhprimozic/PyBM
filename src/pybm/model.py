@@ -1,16 +1,18 @@
 # Proccess-based modeling formalisation in Python.
 # Types are used, but not enforced.
+from collections import deque
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any, List, Literal
 from unicodedata import name
 import warnings
+import numpy as np
 
 VarType = Literal["endo", "exo", "not_set"]
 Aggregation = Literal["sum", "product", "mean", "max", "min"]
 
 
-class Model:
+class Model():
     """
     Represents different model configuration. Each model has its own set of variables and constants. 
 
@@ -22,54 +24,138 @@ class Model:
         self.vars : "dict[str, Var]" = {}
         self.consts : "dict[str, Const]" = {}
         self.elements : "dict[str, Entity | Var | Const]" = {}
+        # parents - parent entities or None 
+        self.parents :"dict[str, str | None]" = {}
 
         # collect data from args
         for arg in args:
-            if isinstance(arg, Entity):
-                # store entity AND its variables and constants
-                # check for name conflicts
-                if arg.name in self.entities:
-                    raise ValueError(f"Entity {arg.name} already exists in the model.")
-                self.entities[arg.name] = arg
-                if arg.name in self.elements:
-                    raise ValueError(f"Element {arg.name} already exists in the model.")
-                self.elements[arg.name] = arg
+            self.add(arg)
 
-                for key, value in arg._data.items():
-                    new_name = f"{arg.name}.{key}"
-                    if isinstance(value, Var):
-                        if new_name in self.vars:
+    def add(self, arg: "Entity | Var | Const", ignore_conflicts: bool = False):
+        # add directly - no parent
+        self.parents[arg.name] = None
+        if isinstance(arg, Entity):
+            # store entity AND its variables and constants
+            # check for name conflicts
+            if arg.name in self.entities:
+                if not ignore_conflicts: # else just skip!
+                    raise ValueError(f"Entity {arg.name} already exists in the model.")
+            self.entities[arg.name] = arg
+            if arg.name in self.elements:
+                if not ignore_conflicts:
+                    raise ValueError(f"Element {arg.name} already exists in the model.")
+            self.elements[arg.name] = arg
+
+            for key, value in arg._data.items():
+                new_name = f"{arg.name}.{key}"
+                if isinstance(value, Var):
+                    if new_name in self.vars:
+                        if not ignore_conflicts:
                             raise ValueError(f"Variable {new_name} already exists in the model.")
-                        self.vars[new_name] = value
-                        if new_name in self.elements:
+                    self.vars[new_name] = value
+                    if new_name in self.elements:
+                        if not ignore_conflicts:
                             raise ValueError(f"Element {new_name} already exists in the model.")
-                        self.elements[new_name] = value
-                    elif isinstance(value, Const):
-                        if new_name in self.consts:
+                    self.elements[new_name] = value
+                elif isinstance(value, Const):
+                    if new_name in self.consts:
+                        if not ignore_conflicts:
                             raise ValueError(f"Constant {new_name} already exists in the model.")
-                        self.consts[new_name] = value
-                        if new_name in self.elements:
+                    self.consts[new_name] = value
+                    if new_name in self.elements:
+                        if not ignore_conflicts:
                             raise ValueError(f"Element {new_name} already exists in the model.")
-                        self.elements[new_name] = value
-                    else:
-                        raise ValueError(f"Entity {arg.name} contains an invalid model component: {value}")
-                    
-            elif isinstance(arg, Var):
-                if arg.name in self.vars:
+                    self.elements[new_name] = value
+                else:
+                    raise ValueError(f"Entity {arg.name} contains an invalid model component: {value}")
+                # store  parent 
+                self.parents[new_name] = arg.name
+            
+                
+        elif isinstance(arg, Var):
+            if arg.name in self.vars:
+                if not ignore_conflicts:
                     raise ValueError(f"Variable {arg.name} already exists in the model.")
-                self.vars[arg.name] = arg
-                if arg.name in self.elements:
+            self.vars[arg.name] = arg
+            if arg.name in self.elements:
+                if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
-                self.elements[arg.name] = arg
-            elif isinstance(arg, Const):
-                if arg.name in self.consts:
+            self.elements[arg.name] = arg
+        elif isinstance(arg, Const):
+            if arg.name in self.consts:
+                if not ignore_conflicts:
                     raise ValueError(f"Constant {arg.name} already exists in the model.")
-                self.consts[arg.name] = arg
-                if arg.name in self.elements:
+            self.consts[arg.name] = arg
+            if arg.name in self.elements:
+                if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
-                self.elements[arg.name] = arg
+            self.elements[arg.name] = arg
+        else:
+            raise ValueError(f"Argument {arg} is not a valid model component.")
+    def copy(self):
+        """
+        Returns a copy of the model.
+        """
+        new_model = Model()
+
+        # make sure to first add the entities! If you first add all the variables, 
+        # the entities will not be properly initialized?? TODO try
+        for entity in self.entities.values():
+            entity_copy = entity.copy(active_model=new_model)
+            new_model.add(entity_copy, ignore_conflicts=True)
+        for obj_name, obj in self.elements.items():
+            if self.parents[obj_name] is not None:
+                # this object is already added as part of an entity, skip it
+                continue
+            if isinstance(obj, Entity):
+                continue
             else:
-                raise ValueError(f"Argument {arg} is not a valid model component.")
+                obj_copy = obj.copy() if hasattr(obj, "copy") else obj
+            new_model.add(obj_copy, ignore_conflicts=True)
+        return new_model
+
+    def induce(self):
+        """
+        Returns a list of all the possible models, induced from the current model.        
+        """
+        # bfs through the model tree, looking for any choices. If a choice is found, it creates a new model for each option and adds it to the list of models to explore.
+        # alternatively a dfs could be used
+
+        models = deque([self.copy()])
+        finished_models = []
+
+        while models:
+            current_model = models.popleft()
+            
+            # check for any choices
+            finished = True 
+            for var_name, var in current_model.vars.items():
+                if var.ode is not None:
+                    attr = "ode"
+                elif var.algebraic is not None:
+                    attr = "algebraic"
+                else:
+                    continue
+                expr = getattr(var, attr)
+
+                if isinstance(expr, Choose):
+                    # append new models 
+                    for option in expr.options:
+                        new_model = current_model.copy()
+                        setattr(new_model.vars[var_name], attr, option)
+                        models.append(new_model)
+                    # this model is not finished 
+                    finished = False
+            # no new models were created, so this model has no more choices and is finished
+            if finished:
+                finished_models.append(current_model)
+        return finished_models
+                   
+    def __str__(self):
+        return f"Model(Entities: {list(self.entities.keys())}, Vars: {list(self.vars.keys())}, Consts: {list(self.consts.keys())})"
+    
+    def __repr__(self):
+        return f"Model(Entities: {list(self.entities.values())}, Vars: {list(self.vars.values())}, Consts: {list(self.consts.values())})"
 
 EMPTY_MODEL = Model()
 
@@ -123,37 +209,11 @@ class Var(DataContainer):
             ode=self.ode,
             algebraic=self.algebraic,
         )
+    
+    def update(self, **kwargs):
+        raise NotImplementedError()
 
-    def unpack(self):
-        """
-        Returns a tuple of all possible realisations of equations.
-        """
-        raise NotImplementedError("TODO!!! Use Model class!")
-        # check if ode and algebraic are both set
-        if self.ode is not None and self.algebraic is not None:
-            raise ValueError(
-                f"Variable {self.name} has both an ODE and an algebraic equation. Only one can be set."
-            )
-        # check if neither is set
-        if self.ode is None and self.algebraic is None:
-            return [self.copy()]
 
-        if isinstance(self.ode, Choose):
-            ans = []
-            for option in self.ode.options:
-                var_copy = self.copy()
-                var_copy.ode = option
-                ans.append(var_copy)
-            return ans
-        if isinstance(self.algebraic, Choose):
-            ans = []
-            for option in self.algebraic.options:
-                var_copy = self.copy()
-                var_copy.algebraic = option
-                ans.append(var_copy)
-            return ans
-        # if neither is a Choose, return the variable as is
-        return [self.copy()]
 
 @dataclass(frozen=True)
 class VarTemp:
@@ -197,6 +257,16 @@ class Const(DataContainer):
 
     def __str__(self):
         return self.name
+    def copy(self):
+        """
+        Returns a copy of the constant.
+        """
+        return Const(
+            name=self.name,
+            value=self.value,
+            range=self.range,
+            unit=self.unit,
+        )
 
 
 @dataclass(frozen=True)
@@ -254,11 +324,13 @@ class Entity(MutableMapping):
 
         # set actrive model - container of vars and consts. 
         if active_model is None:    
-            active_model = EMPTY_MODEL
+            active_model = Model()
         self.active_model: "Model" = active_model
 
 
         for arg in args:
+
+            # add to entity 
             if isinstance(arg, Var):
                 self._vars.add(arg.name)
                 self._data[arg.name] = arg
@@ -271,22 +343,29 @@ class Entity(MutableMapping):
                     self._data[arg.name] = arg
                 except AttributeError:
                     raise ValueError(f"Argument {arg} does not have a name attribute.")
+        
+        # add the entity to the active model
+        self.active_model.add(self)
+
+    def parse_name(self, name: str):
+        return self.name + "." + name
 
     def __getitem__(self, name):
         """
         Returns the value of the variable or constant with the given name.
         """
         # get variable data  from the model 
-        var_or_const = self.active_model.elements.get(name)
+        var_or_const = self.active_model.elements.get(self.parse_name(name))
         if not isinstance(var_or_const, (Var, Const)):
-            raise KeyError(f"{name} is not a Var or Const in the active model.")
+            raise KeyError(f"{self.parse_name(name)} is not a Var or Const in the active model.")
         return var_or_const.data
+
 
     def get(self, name):
         """
         Returns the variable or constant with the given name.
         """
-        return self.active_model.elements.get(name)
+        return self.active_model.elements.get(self.parse_name(name))
 
     def __setitem__(self, name, value):
         """
@@ -295,13 +374,16 @@ class Entity(MutableMapping):
 
         This metod is used to directly override the data of the variable/constant. To set a new variable or constant under a certain name, use the 'set' method.
         """
-        raise NotImplementedError("This method is not implemented yet. Use the 'set' method instead.")
+        var_or_const = self.active_model.elements.get(self.parse_name(name))
+        if not isinstance(var_or_const, (Var, Const)):
+            raise KeyError(f"{name} is not a Var or Const in the active model.")
+        var_or_const.data = value
 
     def set(self, name, value: Var | Const | Any):
         """
         Replaces the variable or constant with the given name.
         """
-        raise NotImplementedError("This method is not implemented yet. Use the 'add' method instead.")
+        raise NotImplementedError("TODO")
 
     def __delitem__(self, name):
         del self._data[name]
@@ -336,6 +418,16 @@ class Entity(MutableMapping):
             except AttributeError:
                 raise ValueError(f"Argument {obj} does not have a name attribute.")
 
+    def copy(self, active_model : Model | None=None):
+        """
+        Returns a copy of the entity.
+        """
+        if active_model is None:
+            active_model = self.active_model
+
+        args = [obj.copy() if hasattr(obj, "copy") else obj for obj in self._data.values()]
+        new_entity = Entity(*args, name=self.name, template=self.template, active_model=active_model)
+        return new_entity
 
 class EntityTemp:
     """
@@ -428,27 +520,6 @@ class Choose:
         self.options = args
 
 
-def generate_models(
-    *args: Var | Const | ProcessTemplate | Process | EntityTemp | Entity,
-):
-    """
-    Generates a model from the given variables, constants and processes.
-    """
-    # type checking
-    for arg in args:
-        if not isinstance(
-            arg, (Var, Const, ProcessTemplate, Process, EntityTemp, Entity)
-        ):
-            raise ValueError(f"Argument {arg} is not a valid model component.")
-
-        # only vars and consts are allowed for now
-        if not isinstance(arg, (Var, Const)):
-            raise NotImplementedError(
-                "ProcessTemplate and Process are not implemented yet."
-            )
-
-    models = []
-    raise NotImplementedError("Model generation is not implemented yet.")
 
 
 if __name__ == "__main__":
