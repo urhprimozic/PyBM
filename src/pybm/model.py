@@ -12,20 +12,24 @@ VarType = Literal["endo", "exo", "not_set"]
 Aggregation = Literal["sum", "product", "mean", "max", "min"]
 
 
-class Model():
+class Model:
     """
-    Represents different model configuration. Each model has its own set of variables and constants. 
+    Represents different model configuration. Each model has its own set of variables and constants.
 
-    Entities can communitate with a model. 
+    Entities can communitate with a model.
     """
 
     def __init__(self, *args: "Entity | Var | Const"):
-        self.entities : "dict[str, Entity]" = {}
-        self.vars : "dict[str, Var]" = {}
-        self.consts : "dict[str, Const]" = {}
-        self.elements : "dict[str, Entity | Var | Const]" = {}
-        # parents - parent entities or None 
-        self.parents :"dict[str, str | None]" = {}
+        self.entities: "dict[str, Entity]" = {}
+        self.vars: "dict[str, Var]" = {}
+        self.consts: "dict[str, Const]" = {}
+        self.elements: "dict[str, Entity | Var | Const]" = {}
+        # parents - parent entities or None
+        self.parents: "dict[str, str | None]" = {}
+        # dict between endo names and index in ctx
+        self.endo_index: "dict[str, int]" = {}
+        # dict between const names and index in ctx
+        self.const_index: "dict[str, int]" = {}
 
         # collect data from args
         for arg in args:
@@ -38,7 +42,7 @@ class Model():
             # store entity AND its variables and constants
             # check for name conflicts
             if arg.name in self.entities:
-                if not ignore_conflicts: # else just skip!
+                if not ignore_conflicts:  # else just skip!
                     raise ValueError(f"Entity {arg.name} already exists in the model.")
             self.entities[arg.name] = arg
             if arg.name in self.elements:
@@ -51,54 +55,78 @@ class Model():
                 if isinstance(value, Var):
                     if new_name in self.vars:
                         if not ignore_conflicts:
-                            raise ValueError(f"Variable {new_name} already exists in the model.")
+                            raise ValueError(
+                                f"Variable {new_name} already exists in the model."
+                            )
                     self.vars[new_name] = value
                     if new_name in self.elements:
                         if not ignore_conflicts:
-                            raise ValueError(f"Element {new_name} already exists in the model.")
+                            raise ValueError(
+                                f"Element {new_name} already exists in the model."
+                            )
                     self.elements[new_name] = value
+                    if value.type == "endo":
+                        value.index_in_ctx = len(self.endo_index)
+                        self.endo_index[new_name] = len(self.endo_index)
                 elif isinstance(value, Const):
                     if new_name in self.consts:
                         if not ignore_conflicts:
-                            raise ValueError(f"Constant {new_name} already exists in the model.")
+                            raise ValueError(
+                                f"Constant {new_name} already exists in the model."
+                            )
                     self.consts[new_name] = value
                     if new_name in self.elements:
                         if not ignore_conflicts:
-                            raise ValueError(f"Element {new_name} already exists in the model.")
+                            raise ValueError(
+                                f"Element {new_name} already exists in the model."
+                            )
                     self.elements[new_name] = value
+                    value.index_in_ctx = len(self.const_index)
+                    self.const_index[new_name] = len(self.const_index)
                 else:
-                    raise ValueError(f"Entity {arg.name} contains an invalid model component: {value}")
-                # store  parent 
+                    raise ValueError(
+                        f"Entity {arg.name} contains an invalid model component: {value}"
+                    )
+                # store  parent
                 self.parents[new_name] = arg.name
-            
-                
+
         elif isinstance(arg, Var):
             if arg.name in self.vars:
                 if not ignore_conflicts:
-                    raise ValueError(f"Variable {arg.name} already exists in the model.")
+                    raise ValueError(
+                        f"Variable {arg.name} already exists in the model."
+                    )
             self.vars[arg.name] = arg
             if arg.name in self.elements:
                 if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
             self.elements[arg.name] = arg
+            if arg.type == "endo":
+                arg.index_in_ctx = len(self.endo_index)
+                self.endo_index[arg.name] = len(self.endo_index)
         elif isinstance(arg, Const):
             if arg.name in self.consts:
                 if not ignore_conflicts:
-                    raise ValueError(f"Constant {arg.name} already exists in the model.")
+                    raise ValueError(
+                        f"Constant {arg.name} already exists in the model."
+                    )
             self.consts[arg.name] = arg
             if arg.name in self.elements:
                 if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
             self.elements[arg.name] = arg
+            arg.index_in_ctx = len(self.const_index)
+            self.const_index[arg.name] = len(self.const_index)
         else:
             raise ValueError(f"Argument {arg} is not a valid model component.")
+
     def copy(self):
         """
         Returns a copy of the model.
         """
         new_model = Model()
 
-        # make sure to first add the entities! If you first add all the variables, 
+        # make sure to first add the entities! If you first add all the variables,
         # the entities will not be properly initialized?? TODO try
         for entity in self.entities.values():
             entity_copy = entity.copy(active_model=new_model)
@@ -116,7 +144,7 @@ class Model():
 
     def induce(self):
         """
-        Returns a list of all the possible models, induced from the current model.        
+        Returns a list of all the possible models, induced from the current model.
         """
         # bfs through the model tree, looking for any choices. If a choice is found, it creates a new model for each option and adds it to the list of models to explore.
         # alternatively a dfs could be used
@@ -126,9 +154,9 @@ class Model():
 
         while models:
             current_model = models.popleft()
-            
+
             # check for any choices
-            finished = True 
+            finished = True
             for var_name, var in current_model.vars.items():
                 if var.ode is not None:
                     attr = "ode"
@@ -139,39 +167,119 @@ class Model():
                 expr = getattr(var, attr)
 
                 if isinstance(expr, Choose):
-                    # append new models 
+                    # append new models
                     for option in expr.options:
                         new_model = current_model.copy()
                         setattr(new_model.vars[var_name], attr, option)
                         models.append(new_model)
-                    # this model is not finished 
+                    # this model is not finished
                     finished = False
             # no new models were created, so this model has no more choices and is finished
             if finished:
                 finished_models.append(current_model)
         return finished_models
-                   
+
     def __str__(self):
         return f"Model(Entities: {list(self.entities.keys())}, Vars: {list(self.vars.keys())}, Consts: {list(self.consts.keys())})"
-    
+
     def __repr__(self):
         return f"Model(Entities: {list(self.entities.values())}, Vars: {list(self.vars.values())}, Consts: {list(self.consts.values())})"
 
+    def f_scipy(self, t, ctx):
+        """
+        Returns the function f(t, x, *params) for scipy integration.
+        """
+        # collect endo variables
+        # collect exo variables
+        # collect constants
+
+        def f(t, x, *params):
+            pass
+
+    def set_as_active(self):
+        """
+        Sets this model as the active model for all its entities, variables and constants.
+        """
+        for entity in self.entities.values():
+            entity.active_model = self
+            for var in entity._vars:
+                entity._data[var].active_model = self
+            for const in entity._consts:
+                entity._data[const].active_model = self
+        for var in self.vars.values():
+            var.active_model = self
+        for const in self.consts.values():
+            const.active_model = self
+
 EMPTY_MODEL = Model()
-
-        
-
-class DataContainer:
-    """ 
-    Data container with additional attributes. This is a base class for Var and Const.
-    """
-
-    def __init__(self, data: Any | None = None):
-        self.data = data
 
 
 @dataclass
-class Var(DataContainer):
+class EvaluationContext:
+    """
+    Evaluation context for the model.
+    """
+
+    t: float | None = None
+    x: np.ndarray | None = None
+
+
+class TimeSeries:
+    def __init__(self, t: np.ndarray | Any, x: np.ndarray | Any):
+        self.t = t
+        self.x = x
+        self.index = 0
+
+    def interpolate(self, index):
+        """
+        Interpolates the value of the variable at the given index.
+        """
+        if index < 0 or index >= len(self.t):
+            raise ValueError(
+                f"Index {index} is out of bounds for time array of length {len(self.t)}."
+            )
+        # linear interpolation
+        if index == len(self.t) - 1:
+            return self.x[index]
+        else:
+            t0 = self.t[index]
+            t1 = self.t[index + 1]
+            x0 = self.x[index]
+            x1 = self.x[index + 1]
+            return x0 + (x1 - x0) * (self.t[index] - t0) / (t1 - t0)
+
+    def bisect(self, t, i0, i1):
+        """
+        Finds the index of the closest time point to t in self.t[i0:i1] using bisection.
+        Interpolates linearly between the two closest points.
+        """
+        self.index = np.searchsorted(self.t[i0:i1], t) + i0 - 1
+        # linear interpolation
+        return self.interpolate(self.index)
+
+    def __call__(self, t, bisection=False):
+        if self.index == 0 and t < self.t[0]:
+            warnings.warn(
+                f"Exogenous variable  is called with t={t} < {self.t[0]}. Returning the first value."
+            )
+            return self.x[0]
+        if bisection:
+            return self.bisect(t, 0, len(self.t) - 1)
+        else:
+            # if the index points on this time, do linear interpolation between the two points
+            if self.t[self.index] <= t and t <= self.t[self.index + 1]:
+                # linear interpolation
+                return self.interpolate(self.index)
+            elif t < self.t[self.index]:
+                # search the left side of the array with bisection
+                return self.bisect(t, 0, self.index)
+            elif t > self.t[self.index + 1]:
+                # search the right side of the array with bisection
+                return self.bisect(t, self.index + 1, len(self.t) - 1)
+
+
+@dataclass
+class Var:
     """
     Represents a variable in the model.
     It has a name and a type, which can be either 'endo' (endogenous) or 'exo' (exogenous).
@@ -187,6 +295,9 @@ class Var(DataContainer):
     unit: str | None = None
     ode: Callable[[Any], Any] | "Choose" | None = None
     algebraic: Callable[[Any], Any] | "Choose" | None = None
+    active_model: "Model | None" = None
+    data: TimeSeries | None = None
+    index_in_ctx: int | None = None
 
     def __post_init__(self):
         # add data
@@ -194,6 +305,38 @@ class Var(DataContainer):
 
     def __str__(self):
         return self.name
+
+    def get_exo(self, t):
+        if self.type != "exo":
+            raise ValueError(f"Variable {self.name} is not exogenous.")
+        if self.data is None:
+            raise ValueError(f"Variable {self.name} has no data.")
+        return self.data(t)
+
+    def __call__(self, t, ctx: Any):
+        if self.active_model is None:
+            raise ValueError("Active model is not set for variable.")
+
+        if self.type == "not_set":
+            raise ValueError(f"Variable {self.name} has no type set.")
+        if self.type == "exo":
+            # read from data
+            return self.get_exo(t)
+        if self.type == "endo":
+            # compute - read from context
+            index = self.index_in_ctx
+            if index is None:
+                raise ValueError(f"Variable {self.name} has no index in context.")
+            return ctx[index]
+
+    def set_data(self, t, x):
+        """
+        Sets the data for the variable.
+        """
+        self.data = TimeSeries(t, x)
+
+    def set_model(self, model: "Model"):
+        self.active_model = model
 
     def copy(self):
         """
@@ -208,11 +351,11 @@ class Var(DataContainer):
             unit=self.unit,
             ode=self.ode,
             algebraic=self.algebraic,
+            index_in_ctx=self.index_in_ctx,
         )
-    
+
     def update(self, **kwargs):
         raise NotImplementedError()
-
 
 
 @dataclass(frozen=True)
@@ -240,7 +383,7 @@ class VarTemp:
 
 
 @dataclass
-class Const(DataContainer):
+class Const:
     """
     Represents a constant parameter in the model.
 
@@ -250,13 +393,27 @@ class Const(DataContainer):
     value: float | Any = None
     range: tuple[float, float] | None = None
     unit: str | None = None
+    active_model: "Model | None" = None
+    index_in_ctx: int | None = None
 
     # add data
     def __post_init__(self):
         super().__init__()
 
+    def set_model(self, model: "Model"):
+        self.active_model = model
+
+    def __call__(self, ctx: Any):
+        if self.active_model is None:
+            raise ValueError("Active model is not set for constant.")
+        index = self.index_in_ctx
+        if index is None:
+            raise ValueError(f"Constant {self.name} has no index in context.")
+        return ctx[index]
+
     def __str__(self):
         return self.name
+
     def copy(self):
         """
         Returns a copy of the constant.
@@ -266,6 +423,7 @@ class Const(DataContainer):
             value=self.value,
             range=self.range,
             unit=self.unit,
+            index_in_ctx=self.index_in_ctx,
         )
 
 
@@ -307,30 +465,31 @@ class Entity(MutableMapping):
         *args: Var | Const | Any,
         name: str | None = None,
         template: "EntityTemp | None" = None,
-        active_model: "Model | None" = None
+        active_model: "Model | None" = None,
     ):
         """ """
 
         # self _data should be DEPRECATED!!!
         self._data: dict[str, Var | Const] = {}
-        self._vars : set[str] = set()
-        self._consts : set[str] = set()
+        self._vars: set[str] = set()
+        self._consts: set[str] = set()
         self.template: "EntityTemp | None" = template
 
         if name is None:
-            warnings.warn("Entity name is not set. Default name was used. In the future, this will raise an error.")
+            warnings.warn(
+                "Entity name is not set. Default name was used. In the future, this will raise an error."
+            )
             name = f"Entity_{id(self)}"
         self.name: str = name
 
-        # set actrive model - container of vars and consts. 
-        if active_model is None:    
+        # set actrive model - container of vars and consts.
+        if active_model is None:
             active_model = Model()
         self.active_model: "Model" = active_model
 
-
         for arg in args:
 
-            # add to entity 
+            # add to entity
             if isinstance(arg, Var):
                 self._vars.add(arg.name)
                 self._data[arg.name] = arg
@@ -343,7 +502,7 @@ class Entity(MutableMapping):
                     self._data[arg.name] = arg
                 except AttributeError:
                     raise ValueError(f"Argument {arg} does not have a name attribute.")
-        
+
         # add the entity to the active model
         self.active_model.add(self)
 
@@ -352,14 +511,26 @@ class Entity(MutableMapping):
 
     def __getitem__(self, name):
         """
-        Returns the value of the variable or constant with the given name.
+        Returns the  the variable or constant with the given name.
         """
-        # get variable data  from the model 
+        # get variable data  from the model
         var_or_const = self.active_model.elements.get(self.parse_name(name))
         if not isinstance(var_or_const, (Var, Const)):
-            raise KeyError(f"{self.parse_name(name)} is not a Var or Const in the active model.")
-        return var_or_const.data
+            raise KeyError(
+                f"{self.parse_name(name)} is not a Var or Const in the active model."
+            )
+        return var_or_const
 
+    def add_ode(self, var_name: str, ode: Callable[[Any], Any]):
+        """
+        Adds an ODE to the variable with the given name.
+        """
+        var = self.get(var_name)
+        if not isinstance(var, Var):
+            raise KeyError(
+                f"{self.parse_name(var_name)} is not a Var in the active model."
+            )
+        var.ode = ode
 
     def get(self, name):
         """
@@ -374,6 +545,7 @@ class Entity(MutableMapping):
 
         This metod is used to directly override the data of the variable/constant. To set a new variable or constant under a certain name, use the 'set' method.
         """
+        raise NotImplementedError("Deprecated. Usage of .data is deprecated")
         var_or_const = self.active_model.elements.get(self.parse_name(name))
         if not isinstance(var_or_const, (Var, Const)):
             raise KeyError(f"{name} is not a Var or Const in the active model.")
@@ -418,16 +590,21 @@ class Entity(MutableMapping):
             except AttributeError:
                 raise ValueError(f"Argument {obj} does not have a name attribute.")
 
-    def copy(self, active_model : Model | None=None):
+    def copy(self, active_model: Model | None = None):
         """
         Returns a copy of the entity.
         """
         if active_model is None:
             active_model = self.active_model
 
-        args = [obj.copy() if hasattr(obj, "copy") else obj for obj in self._data.values()]
-        new_entity = Entity(*args, name=self.name, template=self.template, active_model=active_model)
+        args = [
+            obj.copy() if hasattr(obj, "copy") else obj for obj in self._data.values()
+        ]
+        new_entity = Entity(
+            *args, name=self.name, template=self.template, active_model=active_model
+        )
         return new_entity
+
 
 class EntityTemp:
     """
@@ -486,7 +663,7 @@ class EntityTemp:
 
 
 class Process:
-    def __init(self, *args):
+    def __init__(self, *args):
         raise NotImplementedError("Process class is not implemented yet.")
 
 
@@ -516,10 +693,8 @@ class Choose:
     Represents a choice between different functions/processes.
     """
 
-    def __init__(self, *args:  Callable[[Any], Any] | Any):
+    def __init__(self, *args: Callable[[Any], Any] | Any):
         self.options = args
-
-
 
 
 if __name__ == "__main__":
