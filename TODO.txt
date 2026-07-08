@@ -1,0 +1,11 @@
+- estimate constants w/scipy 
+----------------------------------> v.01 - lahko uporabljam 
+- simulate + estimate w torch& jax
+- comparison 
+---------------------
+- better PBM support, add proccesses & templates 
+- convert ProBMoT code to PyBM 
+- run on Bled 
+------------------------------> v0.2 - lahko pokažem 
+Future plans:
+- better ODE estimation
