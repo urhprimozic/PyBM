@@ -3,7 +3,7 @@
 from collections import deque
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
-from typing import Any, List, Literal
+from typing import Any, List, Literal, TypedDict
 from unicodedata import name
 import warnings
 import numpy as np
@@ -30,12 +30,13 @@ class Model:
         self.endo_index: "dict[str, int]" = {}
         # dict between const names and index in ctx
         self.const_index: "dict[str, int]" = {}
+        self.context_size : int = 0
 
         # collect data from args
         for arg in args:
             self.add(arg)
 
-    def add(self, arg: "Entity | Var | Const", ignore_conflicts: bool = False):
+    def add(self, arg: "Entity | Var | Const", ignore_conflicts: bool = False, set_as_active=True):
         # add directly - no parent
         self.parents[arg.name] = None
         if isinstance(arg, Entity):
@@ -49,10 +50,13 @@ class Model:
                 if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
             self.elements[arg.name] = arg
-
+            # set as active model 
+            if set_as_active:  
+                arg.active_model = self
             for key, value in arg._data.items():
                 new_name = f"{arg.name}.{key}"
                 if isinstance(value, Var):
+                    # check for name conflicts
                     if new_name in self.vars:
                         if not ignore_conflicts:
                             raise ValueError(
@@ -65,6 +69,11 @@ class Model:
                                 f"Element {new_name} already exists in the model."
                             )
                     self.elements[new_name] = value
+                    # set as active model
+                    if set_as_active:
+                        value.active_model = self
+
+                    # assing a place in context for the variable
                     if value.type == "endo":
                         value.index_in_ctx = len(self.endo_index)
                         self.endo_index[new_name] = len(self.endo_index)
@@ -81,8 +90,12 @@ class Model:
                                 f"Element {new_name} already exists in the model."
                             )
                     self.elements[new_name] = value
+                    # set as active model
+                    if set_as_active:
+                        value.active_model = self
                     value.index_in_ctx = len(self.const_index)
                     self.const_index[new_name] = len(self.const_index)
+                    self.context_size += 1
                 else:
                     raise ValueError(
                         f"Entity {arg.name} contains an invalid model component: {value}"
@@ -101,6 +114,9 @@ class Model:
                 if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
             self.elements[arg.name] = arg
+            # set as active model
+            if set_as_active:
+                arg.active_model = self
             if arg.type == "endo":
                 arg.index_in_ctx = len(self.endo_index)
                 self.endo_index[arg.name] = len(self.endo_index)
@@ -115,8 +131,12 @@ class Model:
                 if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
             self.elements[arg.name] = arg
+            # set as active model
+            if set_as_active:
+                arg.active_model = self
             arg.index_in_ctx = len(self.const_index)
             self.const_index[arg.name] = len(self.const_index)
+            self.context_size += 1
         else:
             raise ValueError(f"Argument {arg} is not a valid model component.")
 
@@ -185,16 +205,6 @@ class Model:
     def __repr__(self):
         return f"Model(Entities: {list(self.entities.values())}, Vars: {list(self.vars.values())}, Consts: {list(self.consts.values())})"
 
-    def f_scipy(self, t, ctx):
-        """
-        Returns the function f(t, x, *params) for scipy integration.
-        """
-        # collect endo variables
-        # collect exo variables
-        # collect constants
-
-        def f(t, x, *params):
-            pass
 
     def set_as_active(self):
         """
@@ -283,6 +293,10 @@ class TimeSeries:
                     return self.bisect(t, self.index + 1, len(self.t) - 1)
 
 
+class Context(TypedDict):
+    vars : Any
+    consts : Any
+
 @dataclass
 class Var:
     """
@@ -318,7 +332,7 @@ class Var:
             raise ValueError(f"Variable {self.name} has no data.")
         return self.data(t)
 
-    def __call__(self, t, ctx: Any):
+    def __call__(self, t, ctx: Context):
         if self.active_model is None:
             raise ValueError("Active model is not set for variable.")
 
@@ -335,11 +349,7 @@ class Var:
                 raise ValueError(f"Variable {self.name} has no index in context.")
             
             # read from context 
-            ans_in_ctx = ctx.get(index)
-            if ans_in_ctx is not None:
-                return ans_in_ctx
-            elif ans_in_ctx is None:
-                raise NotImplementedError("TODO ode solve al kaj")
+            return ctx["vars"][index]
 
     def set_data(self, t, x):
         """
@@ -415,13 +425,13 @@ class Const:
     def set_model(self, model: "Model"):
         self.active_model = model
 
-    def __call__(self, ctx: Any):
+    def __call__(self, ctx: Context):
         if self.active_model is None:
-            raise ValueError("Active model is not set for constant.")
+            raise ValueError(f"Active model is not set for constant {self.name}.")
         index = self.index_in_ctx
         if index is None:
             raise ValueError(f"Constant {self.name} has no index in context.")
-        return ctx[index]
+        return ctx["consts"][index]
 
     def __str__(self):
         return self.name
