@@ -5,30 +5,6 @@ from scipy.optimize import least_squares
 from pybm.model import Model
 
 
-def prepare_model(model: Model):
-    """
-    Prepares the model for torch-based estimation.
-    """
-    # enumerate constants
-    c_names = [c for c in model.consts.keys()]
-    # enumerate variables
-    v_names = [v for v in model.vars.keys()]
-    # create f
-
-    warning.warn(
-        "Slow! Variables and constants are rewritten every call! TODO: use pointers."
-    )
-
-    def f(t, x, *params):
-        # set new values. x --> variables, params --> constants
-        for i, v in enumerate(v_names):
-            model.vars[v].data = x[i]
-        for i, c in enumerate(c_names):
-            model.consts[c].data = params[i]
-        # stack equations 
-        
-
-
 class Estimator:
     def __init__(self, f):
         pass

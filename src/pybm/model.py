@@ -230,14 +230,16 @@ class TimeSeries:
         self.x = x
         self.index = 0
 
-    def interpolate(self, index):
+    def interpolate(self, index, t):
         """
         Interpolates the value of the variable at the given index.
         """
-        if index < 0 or index >= len(self.t):
-            raise ValueError(
-                f"Index {index} is out of bounds for time array of length {len(self.t)}."
-            )
+        # out of bounds --> return the closest value
+        if index < 0:
+            return self.x[0]
+        elif index >= len(self.t):
+            return self.x[-1]
+        
         # linear interpolation
         if index == len(self.t) - 1:
             return self.x[index]
@@ -246,7 +248,7 @@ class TimeSeries:
             t1 = self.t[index + 1]
             x0 = self.x[index]
             x1 = self.x[index + 1]
-            return x0 + (x1 - x0) * (self.t[index] - t0) / (t1 - t0)
+            return x0 + (x1 - x0) * (t - t0) / (t1 - t0)
 
     def bisect(self, t, i0, i1):
         """
@@ -255,27 +257,30 @@ class TimeSeries:
         """
         self.index = np.searchsorted(self.t[i0:i1], t) + i0 - 1
         # linear interpolation
-        return self.interpolate(self.index)
+        return self.interpolate(self.index, t)
 
-    def __call__(self, t, bisection=False):
-        if self.index == 0 and t < self.t[0]:
-            warnings.warn(
-                f"Exogenous variable  is called with t={t} < {self.t[0]}. Returning the first value."
-            )
-            return self.x[0]
-        if bisection:
-            return self.bisect(t, 0, len(self.t) - 1)
+    def __call__(self, t, bisection=False, numpy=True):
+        if numpy:
+            return np.interp(t, self.t, self.x)
         else:
-            # if the index points on this time, do linear interpolation between the two points
-            if self.t[self.index] <= t and t <= self.t[self.index + 1]:
-                # linear interpolation
-                return self.interpolate(self.index)
-            elif t < self.t[self.index]:
-                # search the left side of the array with bisection
-                return self.bisect(t, 0, self.index)
-            elif t > self.t[self.index + 1]:
-                # search the right side of the array with bisection
-                return self.bisect(t, self.index + 1, len(self.t) - 1)
+            if self.index == 0 and t < self.t[0]:
+                warnings.warn(
+                    f"Exogenous variable  is called with t={t} < {self.t[0]}. Returning the first value."
+                )
+                return self.x[0]
+            if bisection:
+                return self.bisect(t, 0, len(self.t) - 1)
+            else:
+                # if the index points on this time, do linear interpolation between the two points
+                if self.t[self.index] <= t and t <= self.t[self.index + 1]:
+                    # linear interpolation
+                    return self.interpolate(self.index, t)
+                elif t < self.t[self.index]:
+                    # search the left side of the array with bisection
+                    return self.bisect(t, 0, self.index)
+                elif t > self.t[self.index + 1]:
+                    # search the right side of the array with bisection
+                    return self.bisect(t, self.index + 1, len(self.t) - 1)
 
 
 @dataclass
@@ -293,7 +298,7 @@ class Var:
     range: tuple[float, float] | None = None
     aggregation: Aggregation | None = None
     unit: str | None = None
-    ode: Callable[[Any], Any] | "Choose" | None = None
+    ode: Callable[[Any, Any], Any] | "Choose" | None = None
     algebraic: Callable[[Any], Any] | "Choose" | None = None
     active_model: "Model | None" = None
     data: TimeSeries | None = None
@@ -323,11 +328,18 @@ class Var:
             # read from data
             return self.get_exo(t)
         if self.type == "endo":
+            
             # compute - read from context
             index = self.index_in_ctx
             if index is None:
                 raise ValueError(f"Variable {self.name} has no index in context.")
-            return ctx[index]
+            
+            # read from context 
+            ans_in_ctx = ctx.get(index)
+            if ans_in_ctx is not None:
+                return ans_in_ctx
+            elif ans_in_ctx is None:
+                raise NotImplementedError("TODO ode solve al kaj")
 
     def set_data(self, t, x):
         """
