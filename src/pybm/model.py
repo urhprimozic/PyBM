@@ -220,6 +220,27 @@ class Model:
             var.active_model = self
         for const in self.consts.values():
             const.active_model = self
+    def get_endo_variables(self):
+        """
+        Returns a list of all endogenous variables in the model.
+        """
+        return [var for var in self.vars.values() if var.type == "endo"]
+    def get_initial_const_ctx(self, default : float | None = 0.0):
+        """
+        Returns the initial context for the constants in the model.
+        """
+        const_ctx = np.zeros(len(self.const_index), dtype=float)
+        for const_name, const in self.consts.items():
+            if const.index_in_ctx is None:
+                raise ValueError(f"Constant {const.name} has no index in context.")
+            if const.initial_value is None  or  const.index_in_ctx == np.nan:
+                if default is not None:
+                    const_ctx[const.index_in_ctx] = default
+                else:
+                    raise ValueError(f"Constant {const.name} has no initial value.")
+            else:
+                const_ctx[const.index_in_ctx] = const.initial_value
+        return const_ctx
 
 EMPTY_MODEL = Model()
 
@@ -412,7 +433,7 @@ class Const:
     """
 
     name: str
-    value: float | Any = None
+    initial_value: float | Any = None
     range: tuple[float, float] | None = None
     unit: str | None = None
     active_model: "Model | None" = None
@@ -442,7 +463,7 @@ class Const:
         """
         return Const(
             name=self.name,
-            value=self.value,
+            initial_value=self.initial_value,
             range=self.range,
             unit=self.unit,
             index_in_ctx=self.index_in_ctx,
@@ -456,12 +477,12 @@ class ConstTemp:
     """
 
     name: str
-    value: float | Any = None
+    initial_value: float | Any = None
     range: tuple[float, float] | None = None
     unit: str | None = None
 
     def create(self):
-        return Const(name=self.name, value=self.value, range=self.range, unit=self.unit)
+        return Const(name=self.name, initial_value=self.initial_value, range=self.range, unit=self.unit)
 
 
 class Entity(MutableMapping):
@@ -718,35 +739,3 @@ class Choose:
     def __init__(self, *args: Callable[[Any], Any] | Any):
         self.options = args
 
-
-if __name__ == "__main__":
-    # Example usage
-    v1 = Var("x")
-    v2 = Var("y")
-    c1 = Const("mass", value=0.5)
-
-    particle = Entity(v1, v2, c1)
-
-    print(particle["x"])  # Output: Var(name='x', type='endo', initial=0.0, value=None)
-    print(particle["y"])  # Output: Var(name='y', type='exo', initial=1.0, value=None)
-    print(particle["k"])  # Output: Const(name='k', value=0.5)
-
-    # Create an entity template
-    particle_template = EntityTemp(
-        VarTemp("x", type="endo", initial=0.0),
-        VarTemp("y", type="exo", initial=1.0),
-        ConstTemp("k", value=0.5),
-    )
-    # create one instance of the template
-    neon_particle = particle_template(name="neon_particle")
-
-    # create another and add a new variable to it
-    higgs_boson = particle_template(name="higgs_boson")
-    higgs_boson.add(Var("spin"))
-
-    # every elementary particle has its own spin --> create a new template for elementary particles based on the old one
-    elementary_particle_template = particle_template
-    elementary_particle_template.add(VarTemp("spin"))
-
-    # now create a new instance of the elementary particle template - it will automaticly have the spin variable
-    electron = elementary_particle_template(name="electron")

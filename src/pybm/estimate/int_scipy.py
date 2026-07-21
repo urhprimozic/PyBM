@@ -80,144 +80,76 @@ def simulate(*vars: Var, t_eval, const_ctx, var_ctx_size=None, **kwargs):
     sol = solve_ivp(fun=f, t_span=(t_eval[0], t_eval[-1]), y0=initial_values, t_eval=t_eval)
     return sol
 
+def get_data_matrix(*vars: Var, t_eval):
+    """
+    Returns a matrix of shape (n_vars, n_time_points) containing the data of the variables at the given time points.
 
-class Estimator:
-    def __init__(self, f):
-        pass
+    Parameters
+    ----------
+    *vars : Var
+        List of endogenous variables. Each variable `var : Var` must have:
+            - data `var.data : TimeSeries`, the observed data for the variable
+    t_eval : array-like
+        Time points to evaluate and compute the solution.
 
-    def fit(self, *params):
-        pass
+    Returns
+    -------
+    data_matrix : ndarray
+        Shape (n_vars, n_time_points). data_matrix[i, j] is the data of variable i at time t_eval[j]
+    """
+    data_matrix = np.zeros((len(vars), len(t_eval)), dtype=float)
+
+    for i, var in enumerate(vars):
+        if var.data is None:
+            raise ValueError(f"Variable {var.name} does not have data defined.")
+        for j, t in enumerate(t_eval):
+            data_matrix[i, j] = var.data(t)
+
+    return data_matrix
 
 
-class SingleShootingScipy(Estimator):
-    def __init__(
-        self,
-        f,
-        method="RK45",
-        rtol=1e-6,
-        atol=1e-8,
-    ):
-        """
-        Parameters
-        ----------
-        f : callable
-            Function f(t, x, *params) returning dx/dt.
-        method : str
-            solve_ivp integration method.
-        """
-        self.f = f
-        self.method = method
-        self.rtol = rtol
-        self.atol = atol
 
-    def simulate(self, t, x0, params):
-        """
-        Simulate the ODE.
 
-        Parameters
-        ----------
-        t : (N,) array
-            Time points.
-        x0 : (n,) array
-            Initial condition.
-        params : iterable
-            Model parameters.
+def estimate(model : Model, t_eval, return_scipy=True):
+    """
+    Estimate the constants of the model based on the data. 
 
-        Returns
-        -------
-        ndarray
-            Shape (N, n_states)
-        """
+    Parameters
+    ----------
+    *vars : Var
+        List of endogenous variables. Each variable `var : Var` must have: 
+            - differential equation `var.ode(t, ctx)`  
+            - inital value `var.initial : float|Any`  
+            - Valid index in context `var.index_in_ctx : int`, obtained with adding the variable to the model
+            - data `var.data : array-like`, the observed data for the variable
+    t_eval : array-like, optional
+        Time points to evaluate and compute the solution.
+    """
+    # collect vars 
+    vars = model.get_endo_variables()
+    # get the data, that we want to fit the model to
+    data = get_data_matrix(*vars, t_eval=t_eval)
+    # initial context:
+    initial_ctx = model.get_initial_const_ctx()
+    
 
-        x0 = np.asarray(x0, dtype=float).reshape(-1)
 
-        sol = solve_ivp(
-            lambda tt, xx: self.f(tt, xx, *params),
-            t_span=(t[0], t[-1]),
-            y0=x0,
-            t_eval=t,
-            method=self.method,
-            rtol=self.rtol,
-            atol=self.atol,
-        )
 
-        if not sol.success:
-            raise RuntimeError(sol.message)
+    def residuals(const_ctx):
+        # get predictions
+        sol = simulate(*vars, t_eval=t_eval, const_ctx=const_ctx)
+        pred = sol.y # of shape (n_vars, n_time_points)
+        return (pred - data ).ravel()
+    
 
-        return sol.y.T
-
-    def residuals(self, params, t, x):
-        """
-        Residual vector for least_squares.
-        """
-
-        xhat = self.simulate(
-            t=t,
-            x0=x[0],
-            params=params,
-        )
-
-        return (xhat - x).ravel()
-
-    def fit(
-        self,
-        t,
-        x,
-        initial_guess,
-        bounds=(-np.inf, np.inf),
-        loss="linear",
-    ):
-        """
-        Estimate parameters.
-
-        Parameters
-        ----------
-        t : (N,) array
-        x : (N,) or (N,n)
-        initial_guess : iterable
-        bounds : tuple
-        loss : str
-            Passed to scipy.optimize.least_squares.
-
-        Returns
-        -------
-        OptimizeResult
-        """
-
-        t = np.asarray(t, dtype=float)
-        x = np.asarray(x, dtype=float)
-
-        if t.ndim != 1:
-            raise ValueError("t must be one-dimensional.")
-
-        if x.ndim == 1:
-            x = x[:, None]
-
-        if len(t) != len(x):
-            raise ValueError("t and x must have the same length.")
-
-        result = least_squares(
-            fun=self.residuals,
-            x0=np.asarray(initial_guess, dtype=float),
-            bounds=bounds,
-            args=(t, x),
+    result = least_squares(
+            fun=residuals,
+            x0=np.asarray(initial_ctx, dtype=float),
             method="trf",
-            jac="2-point",
-            loss=loss,
+            jac="2-point"
         )
 
+    if return_scipy:
         return result
-
-    def predict(self, t, x0, params):
-        """
-        Simulate the model.
-
-        Returns data in the same shape as the input state.
-        """
-
-        xhat = self.simulate(t, x0, params)
-
-        if xhat.shape[1] == 1:
-            return xhat[:, 0]
-
-        return xhat
+    else:
+        return result.x
