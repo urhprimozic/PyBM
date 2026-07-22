@@ -1,99 +1,73 @@
-import torch
-from torch import nn
+import torch 
 import torchode as to
-from pybm.model import Model
+from typing import Any, cast
+import numpy as np
+from pybm.model import Choose, Context, Model, Var
 
+def get_initial_var_ctx(model: Model):
+    """
+    Creates a torch tensor context with initial values of the variables.
+    """
+    ans = torch.zeros(len(model.endo_index))
+    
+    for var_name, index in model.endo_index.items():
+        var = model.vars[var_name]
+        if var.initial is None:
+            raise ValueError(f"Variable {var_name} does not have an initial value defined.")
+        ans[index] = var.initial
+    return ans.unsqueeze(1)
 
-class ODEFunc(nn.Module):
-    def __init__(self, f, initial_guess):
-        super().__init__()
+def simulate(model:Model, t_eval, const_ctx, var_ctx_size=None, **kwargs):
+    """
+    Solve ODE for given endogenous variables using torchode.
 
-        self.f = f
+    Parameters
+    ----------
+    *vars : Var
+        List of endogenous variables. Each variable `var : Var` must have: 
+            - differential equation `var.ode(t, ctx)`  
+            - inital value `var.initial : float|Any`  
+            - Valid index in context `var.index_in_ctx : int`, obtained with adding the variable to the model
+    t_eval : array-like, optional
+        Time points to evaluate and compute the solution.
+    const_ctx : array-like
+        Constant context for the model. Must be of shape (n_constants,).        
+    """
+   # function f(t, var_ctx) for x'(t) = f(t, x(t)
+    vars = model.get_endo_variables()
 
-        self.params = nn.ParameterList(
-            [nn.Parameter(torch.tensor(float(c))) for c in initial_guess]
-        )
+    def f(t, var_ctx):
+        derivatives = torch.zeros_like(var_ctx)
+        for var in vars:
+            if var.ode is None:
+                raise ValueError(f"Variable {var.name} does not have an ODE defined.")
+            if isinstance(var.ode, Choose):
+                raise ValueError(
+                    f"Variable {var.name} has a Choose object as ODE. First use model.induce() to get a list of models without Choose objects."
+                )             
+            # compute and store new derivatives
+            new_ctx = Context(vars=var_ctx, consts=const_ctx)
+            derivatives[var.index_in_ctx] = var.ode(t, new_ctx)
+        
+        return derivatives
 
-    def forward(self, t, x):
-        return self.f(t, x, *self.params)
+    # get initiač values
+    initial_var_ctx = get_initial_var_ctx(model)
 
+    # prepare solver 
+    term = to.ODETerm(f)
+    step_method = to.Dopri5(term=term)
+    step_size_controller = to.IntegralController(atol=1e-6, rtol=1e-3, term=term)
+    solver = to.AutoDiffAdjoint(step_method, step_size_controller)
+    jit_solver = torch.compile(solver)
 
-class SingleShootingEstimatorTorch:
+    # fix times dimensions
+    t_eval = torch.tensor(t_eval)
+    if t_eval.dim() == 1:
+        t_eval = t_eval.unsqueeze(0)
 
-    def __init__(
-        self,
-        f,
-        rtol=1e-6,
-        atol=1e-8,
-    ):
-        self.f = f
-        self.rtol = rtol
-        self.atol = atol
+    # solve
+    sol = jit_solver.solve(to.InitialValueProblem(y0=initial_var_ctx, t_eval=t_eval))
 
-    def fit(
-        self,
-        t,
-        x,
-        initial_guess,
-        max_iter=1000,
-    ):
-
-        t = torch.as_tensor(t, dtype=torch.float32)
-
-        x = torch.as_tensor(x, dtype=torch.float32)
-
-        if x.ndim == 1:
-            x = x[:, None]
-
-        model = ODEFunc(
-            self.f,
-            initial_guess,
-        )
-
-        term = to.ODETerm(model)
-
-        step_method = to.Tsit5(term)
-
-        controller = to.IntegralController(
-            atol=self.atol,
-            rtol=self.rtol,
-            term=term,
-        )
-
-        solver = to.AutoDiffAdjoint(
-            step_method,
-            controller,
-        )
-
-        optimizer = torch.optim.LBFGS(
-            model.parameters(),
-            max_iter=max_iter,
-            line_search_fn="strong_wolfe",
-        )
-
-        x0 = x[:1]
-
-        def closure():
-
-            optimizer.zero_grad()
-
-            problem = to.InitialValueProblem(
-                y0=x0,
-                t_eval=t.unsqueeze(0),
-            )
-
-            sol = solver.solve(problem)
-
-            pred = sol.ys.squeeze(0)
-
-            loss = ((pred - x) ** 2).mean()
-
-            loss.backward()
-
-            return loss
-
-        optimizer.step(closure)
-
-        params = [p.detach().item() for p in model.params]
-
-        return params
+    return sol
+        
