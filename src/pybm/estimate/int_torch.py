@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 import warnings
 
 import torch
@@ -7,6 +7,17 @@ import numpy as np
 from torchmin import minimize # TODO doesnt work....
 from torch.optim import LBFGS
 from pybm.model import Choose, Context, Model, Var
+
+
+def adaptive_loss(pred, target, q=0.9, eps=1e-8):
+    # 1) relativna napaka (za eksponente je to ključno)
+    r = (pred - target) / (target.abs() + eps)
+
+    # 2) adaptivni prag iz trenutnih residualov
+    delta = torch.quantile(r.detach().abs(), q).clamp_min(1e-3)
+
+    # 3) pseudo-Huber (gladek, ne eksplodira kot MSE)
+    return (delta**2 * (torch.sqrt(1.0 + (r / delta)**2) - 1.0)).mean()
 
 
 
@@ -118,9 +129,33 @@ def get_initial_const_ctx(model: Model, default: float | None = 1.0):
     return const_ctx
 
 
-def estimate(model: Model, t_eval, *, max_iter: int = 200):
+def get_jit_estimate():
     """
-    Estimate constants with torchmin.minimize.
+    Estimate constants with L-BFGS. Just in time compiled.
+    """
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.suppress_errors = True
+    return torch.compile(estimate)
+     
+
+def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", **kwargs):
+    """
+    Estimate constants with L-BFGS.
+
+    Method can fail due to overflows. In this case, try 
+    using `loss="adaptive"` which is more robust to outliers and overflows.
+
+    Parameters
+    ----------
+    model : Model
+        Model with defined variables, constants, and ODEs.
+    t_eval : array-like
+        Time points to evaluate and compute the solution.
+    loss : str, optional
+        Loss function to use for optimization. Options are:
+        - "sum": Sum of squared residuals.
+        - "mean": Mean of squared residuals.
+        - "adaptive": Adaptive loss function based on quantiles of residuals.
     """
     vars_ = model.get_endo_variables()
     t_eval = t_eval.reshape(-1)
@@ -139,11 +174,20 @@ def estimate(model: Model, t_eval, *, max_iter: int = 200):
         # compute residuals
         residuals = torch.ravel(pred - data)
         # compute mean squared error
-        mse = torch.sum(torch.pow(residuals, 2))
+        if loss == "mean":
+            mse = torch.mean(torch.pow(residuals, 2))
+        elif loss == "sum":
+            mse = torch.sum(torch.pow(residuals, 2))
+        else:
+            mse = adaptive_loss(pred, data)
         return mse
 
     # minimize
-    optimizer = LBFGS([initial_const_ctx], lr=0.1)
+    if kwargs is None:
+        kwargs = {"lr": 0.1}
+    if "lr" not in kwargs:
+        kwargs["lr"] = 0.1
+    optimizer = LBFGS([initial_const_ctx], **kwargs)
 
     def closure():
         optimizer.zero_grad()
@@ -153,8 +197,11 @@ def estimate(model: Model, t_eval, *, max_iter: int = 200):
 
     optimizer.step(closure)
 
+
+    loss = objective(initial_const_ctx).item()
     # return the estimated constants
-    return initial_const_ctx
+    return initial_const_ctx, loss
+        
 
     
 

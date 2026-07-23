@@ -127,7 +127,7 @@ def get_data_matrix(*vars: Var, t_eval):
 
 
 
-def estimate(model : Model, t_eval):
+def estimate(model : Model, t_eval, return_old=False):
     """
     Estimate the constants of the model based on the data. 
 
@@ -169,8 +169,10 @@ def estimate(model : Model, t_eval):
 
     const_to_value = {const.name: const_ctx for const, const_ctx in zip(model.consts.values(), result.x)}
 
-    results = {"scipy_result": result, "const_ctx": result.x, 
-               "dict": const_to_value
-               }
-
+    if return_old:
+        results = {"scipy_result": result, "const_ctx": result.x, 
+                "dict": const_to_value
+                }
+    else:
+        results = result.x, result.cost
     return results
