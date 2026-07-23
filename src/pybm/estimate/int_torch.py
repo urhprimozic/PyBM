@@ -165,7 +165,7 @@ def get_jit_estimate():
     return torch.compile(estimate)
      
 
-def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", opt:Literal["adam", "sgd", "lbfgs"]="lbfgs", **kwargs):
+def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", opt:Literal["adam", "radam", "sgd", "lbfgs"]="lbfgs", **kwargs):
     """
     Estimate constants with L-BFGS.
 
@@ -244,6 +244,20 @@ def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="me
             max_iter = kwargs["max_iter"]
             kwargs.pop("max_iter")
         optimizer = torch.optim.Adam([initial_const_ctx], **kwargs)
+
+        for _ in range(kwargs.get("max_iter", 100)):
+            optimizer.zero_grad()
+            loss = objective(initial_const_ctx)
+            loss.backward()
+            optimizer.step()
+    elif opt == "radam":
+        kwargs.setdefault("lr", 0.01)
+        if "max_iter" not in kwargs:
+            max_iter = 100
+        else:
+            max_iter = kwargs["max_iter"]
+            kwargs.pop("max_iter")
+        optimizer = torch.optim.RAdam([initial_const_ctx], **kwargs)
 
         for _ in range(kwargs.get("max_iter", 100)):
             optimizer.zero_grad()

@@ -5,6 +5,16 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
 from pybm.model import Choose, Context, Model, Var
 
+def set_consts(model : Model, const_ctx : np.ndarray):
+    """
+    Set the values of the constants in the model based on the given context.
+    """
+    print("warning: TODO use .value for current value and initial_value just for initial value.")
+    for const_name, const in model.consts.items():
+        if const.index_in_ctx is None:
+            raise ValueError(f"Constant {const.name} has no index in context.")
+        const.initial_value = const_ctx[const.index_in_ctx]
+
 def get_initial_const_ctx(model : Model, default : float | None = 0.0):
         """
         Returns the initial context for the constants in the model.
