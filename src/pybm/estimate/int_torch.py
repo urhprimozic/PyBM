@@ -1,23 +1,31 @@
-import torch 
+from typing import Any
+import warnings
+
+import torch
 import torchode as to
-from typing import Any, cast
 import numpy as np
+from torchmin import minimize # TODO doesnt work....
+from torch.optim import LBFGS
 from pybm.model import Choose, Context, Model, Var
+
+
 
 def get_initial_var_ctx(model: Model):
     """
     Creates a torch tensor context with initial values of the variables.
     """
-    ans = torch.zeros(len(model.endo_index))
+    # initial variables are constants - no need for grads
+    ans =  [0] * len(model.endo_index)#torch.zeros(len(model.endo_index))
     
     for var_name, index in model.endo_index.items():
         var = model.vars[var_name]
         if var.initial is None:
             raise ValueError(f"Variable {var_name} does not have an initial value defined.")
         ans[index] = var.initial
+    ans = torch.tensor(ans, requires_grad=True)
     return ans.unsqueeze(1)
 
-def simulate(model:Model, t_eval, const_ctx, var_ctx_size=None, **kwargs):
+def simulate(model:Model, t_eval, const_ctx, initial_var_ctx, **kwargs):
     """
     Solve ODE for given endogenous variables using torchode.
 
@@ -37,7 +45,7 @@ def simulate(model:Model, t_eval, const_ctx, var_ctx_size=None, **kwargs):
     vars = model.get_endo_variables()
 
     def f(t, var_ctx):
-        derivatives = torch.zeros_like(var_ctx)
+        derivatives : list[Any] = [0] * len(vars)  # initialize derivatives tensor
         for var in vars:
             if var.ode is None:
                 raise ValueError(f"Variable {var.name} does not have an ODE defined.")
@@ -46,28 +54,108 @@ def simulate(model:Model, t_eval, const_ctx, var_ctx_size=None, **kwargs):
                     f"Variable {var.name} has a Choose object as ODE. First use model.induce() to get a list of models without Choose objects."
                 )             
             # compute and store new derivatives
-            new_ctx = Context(vars=var_ctx, consts=const_ctx)
+            #new_ctx = Context(vars=var_ctx, consts=const_ctx)
+            new_ctx = {
+                "vars": var_ctx,
+                "consts": const_ctx
+            }
             derivatives[var.index_in_ctx] = var.ode(t, new_ctx)
-        
-        return derivatives
 
-    # get initiač values
-    initial_var_ctx = get_initial_var_ctx(model)
+        derivatives = torch.stack(derivatives)  # convert list to tensor
+        return derivatives
 
     # prepare solver 
     term = to.ODETerm(f)
     step_method = to.Dopri5(term=term)
     step_size_controller = to.IntegralController(atol=1e-6, rtol=1e-3, term=term)
     solver = to.AutoDiffAdjoint(step_method, step_size_controller)
-    jit_solver = torch.compile(solver)
 
     # fix times dimensions
-    t_eval = torch.tensor(t_eval)
     if t_eval.dim() == 1:
         t_eval = t_eval.unsqueeze(0)
 
     # solve
-    sol = jit_solver.solve(to.InitialValueProblem(y0=initial_var_ctx, t_eval=t_eval))
+    sol = solver.solve(to.InitialValueProblem(y0=initial_var_ctx, t_eval=t_eval))
 
     return sol
-        
+
+
+def get_data_matrix(*vars: Var, t_eval):
+    """
+    Returns data as shape (n_vars, n_time_points).
+    """
+    t_eval = t_eval.reshape(-1)
+    data_matrix = torch.zeros((len(vars), len(t_eval)), dtype=torch.float64)
+
+    for i, var in enumerate(vars):
+        if var.data is None:
+            raise ValueError(f"Variable {var.name} does not have data defined.")
+        for j, t in enumerate(t_eval):
+            data_matrix[i, j] = float(var.data(float(t)))
+
+    return data_matrix
+
+
+def get_initial_const_ctx(model: Model, default: float | None = 1.0):
+    """
+    Initial constant vector.
+    """
+    const_ctx = [0] * len(model.const_index)
+
+    for const_name, const in model.consts.items():
+        if const.index_in_ctx is None:
+            raise ValueError(f"Constant {const.name} has no index in context.")
+        if const.initial_value is None:
+            if default is not None:
+                const_ctx[const.index_in_ctx] = default
+            else:
+                raise ValueError(f"Constant {const.name} has no initial value.")
+        else:
+            const_ctx[const.index_in_ctx] = float(const.initial_value)
+
+    const_ctx = torch.tensor(const_ctx, requires_grad=True)
+
+    return const_ctx
+
+
+def estimate(model: Model, t_eval, *, max_iter: int = 200):
+    """
+    Estimate constants with torchmin.minimize.
+    """
+    vars_ = model.get_endo_variables()
+    t_eval = t_eval.reshape(-1)
+    data = get_data_matrix(*vars_, t_eval=t_eval)
+    # get initial values of variables
+    initial_var_ctx = get_initial_var_ctx(model)
+    # get initial values of constants
+    initial_const_ctx = get_initial_const_ctx(model)
+
+    # define objective function
+    def objective(const_ctx):
+        # calculate the whole trajectory
+        sim = simulate(model, t_eval=t_eval, const_ctx=const_ctx, initial_var_ctx=initial_var_ctx)
+        # extract 
+        pred = sim.ys.squeeze(-1)
+        # compute residuals
+        residuals = torch.ravel(pred - data)
+        # compute mean squared error
+        mse = torch.sum(torch.pow(residuals, 2))
+        return mse
+
+    # minimize
+    optimizer = LBFGS([initial_const_ctx], lr=0.1)
+
+    def closure():
+        optimizer.zero_grad()
+        loss = objective(initial_const_ctx)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+
+    # return the estimated constants
+    return initial_const_ctx
+
+    
+
+

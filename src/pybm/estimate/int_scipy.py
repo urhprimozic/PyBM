@@ -5,6 +5,23 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
 from pybm.model import Choose, Context, Model, Var
 
+def get_initial_const_ctx(model : Model, default : float | None = 0.0):
+        """
+        Returns the initial context for the constants in the model.
+        """
+        const_ctx = np.zeros(len(model.const_index), dtype=float)
+        for const_name, const in model.consts.items():
+            if const.index_in_ctx is None:
+                raise ValueError(f"Constant {const.name} has no index in context.")
+            if const.initial_value is None  or  const.index_in_ctx == np.nan:
+                if default is not None:
+                    const_ctx[const.index_in_ctx] = default
+                else:
+                    raise ValueError(f"Constant {const.name} has no initial value.")
+            else:
+                const_ctx[const.index_in_ctx] = const.initial_value
+        return const_ctx
+
 def minimal_var_ctx(*vars : Var, set_initials=True, fixed_lenght=None):
     """
     Create the minimal variable context, which is valid for a given set of variables. 
@@ -130,7 +147,7 @@ def estimate(model : Model, t_eval):
     # get the data, that we want to fit the model to
     data = get_data_matrix(*vars, t_eval=t_eval)
     # initial context:
-    initial_ctx = model.get_initial_const_ctx()
+    initial_ctx = get_initial_const_ctx(model)
     
 
 

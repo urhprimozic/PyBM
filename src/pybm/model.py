@@ -225,22 +225,7 @@ class Model:
         Returns a list of all endogenous variables in the model.
         """
         return [var for var in self.vars.values() if var.type == "endo"]
-    def get_initial_const_ctx(self, default : float | None = 0.0):
-        """
-        Returns the initial context for the constants in the model.
-        """
-        const_ctx = np.zeros(len(self.const_index), dtype=float)
-        for const_name, const in self.consts.items():
-            if const.index_in_ctx is None:
-                raise ValueError(f"Constant {const.name} has no index in context.")
-            if const.initial_value is None  or  const.index_in_ctx == np.nan:
-                if default is not None:
-                    const_ctx[const.index_in_ctx] = default
-                else:
-                    raise ValueError(f"Constant {const.name} has no initial value.")
-            else:
-                const_ctx[const.index_in_ctx] = const.initial_value
-        return const_ctx
+
 
 EMPTY_MODEL = Model()
 
