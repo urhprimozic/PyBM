@@ -127,7 +127,7 @@ def get_data_matrix(*vars: Var, t_eval):
 
 
 
-def estimate(model : Model, t_eval, return_old=False):
+def estimate(model : Model, t_eval, return_old=False, verbose=0):
     """
     Estimate the constants of the model based on the data. 
 
@@ -163,7 +163,8 @@ def estimate(model : Model, t_eval, return_old=False):
             fun=residuals,
             x0=np.asarray(initial_ctx, dtype=float),
             method="trf",
-            jac="2-point"
+            jac="2-point",
+            verbose=verbose,
         )
 
 

@@ -200,7 +200,7 @@ class Model:
         return finished_models
 
     def __str__(self):
-        return f"Model(Entities: {list(self.entities.keys())}, Vars: {list(self.vars.keys())}, Consts: {list(self.consts.keys())})"
+        return f"Model(Entities: {list(self.entities.keys())},\n Vars: {list(self.vars.keys())},\n Consts: {list(self.consts.keys())})"
 
     def __repr__(self):
         return f"Model(Entities: {list(self.entities.values())}, Vars: {list(self.vars.values())}, Consts: {list(self.consts.values())})"
