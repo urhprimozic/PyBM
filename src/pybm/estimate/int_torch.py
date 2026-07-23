@@ -91,7 +91,7 @@ def simulate(model:Model, t_eval, const_ctx, initial_var_ctx, **kwargs):
     # Do not let an unstable trial parameter vector consume unbounded memory
     # or time during optimizer line searches.
     solver = to.AutoDiffAdjoint(
-        step_method, step_size_controller, max_steps=10_000
+        step_method, step_size_controller, max_steps=10000
     )
 
     # fix times dimensions
@@ -165,7 +165,7 @@ def get_jit_estimate():
     return torch.compile(estimate)
      
 
-def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", **kwargs):
+def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", opt:Literal["adam", "sgd", "lbfgs"]="lbfgs", **kwargs):
     """
     Estimate constants with L-BFGS.
 
@@ -223,18 +223,47 @@ def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="me
     # minimize
     # Without a line search L-BFGS may propose huge rate constants. That makes
     # the ODE stiff and used to look like an infinite loop in a notebook.
-    kwargs.setdefault("lr", 0.01)
-    kwargs.setdefault("line_search_fn", "strong_wolfe")
-    optimizer = LBFGS([initial_const_ctx], **kwargs)
+   
+    if opt == "lbfgs":
+        kwargs.setdefault("lr", 0.01)
+        kwargs.setdefault("line_search_fn", "strong_wolfe")
+        optimizer = LBFGS([initial_const_ctx], **kwargs)
 
-    def closure():
-        optimizer.zero_grad()
-        loss = objective(initial_const_ctx)
-        loss.backward()
-        return loss
+        def closure():
+            optimizer.zero_grad()
+            loss = objective(initial_const_ctx)
+            loss.backward()
+            return loss
 
-    optimizer.step(closure)
+        optimizer.step(closure)
+    elif opt == "adam":
+        kwargs.setdefault("lr", 0.01)
+        if "max_iter" not in kwargs:
+            max_iter = 100
+        else:
+            max_iter = kwargs["max_iter"]
+            kwargs.pop("max_iter")
+        optimizer = torch.optim.Adam([initial_const_ctx], **kwargs)
 
+        for _ in range(kwargs.get("max_iter", 100)):
+            optimizer.zero_grad()
+            loss = objective(initial_const_ctx)
+            loss.backward()
+            optimizer.step()
+    elif opt == "sgd":
+        kwargs.setdefault("lr", 0.01)
+        if "max_iter" not in kwargs:
+            max_iter = 100
+        else:
+            max_iter = kwargs["max_iter"]
+            kwargs.pop("max_iter")
+        optimizer = torch.optim.SGD([initial_const_ctx], **kwargs)
+
+        for _ in range(kwargs.get("max_iter", 100)):
+            optimizer.zero_grad()
+            loss = objective(initial_const_ctx)
+            loss.backward()
+            optimizer.step()
 
     loss = objective(initial_const_ctx).item()
     # return the estimated constants
