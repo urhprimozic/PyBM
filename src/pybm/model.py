@@ -7,7 +7,8 @@ from typing import Any, List, Literal, TypedDict
 from unicodedata import name
 import warnings
 import numpy as np
-
+import torch
+from pybm.utils import torch_interp
 VarType = Literal["endo", "exo", "not_set"]
 Aggregation = Literal["sum", "product", "mean", "max", "min"]
 
@@ -246,6 +247,13 @@ class TimeSeries:
         self.x = x
         self.index = 0
 
+    def to_torch(self):
+        """
+        Converts the time series to torch tensors.
+        """
+        self.t = torch.tensor(self.t)
+        self.x = torch.tensor(self.x)
+
     def interpolate(self, index, t):
         """
         Interpolates the value of the variable at the given index.
@@ -276,6 +284,9 @@ class TimeSeries:
         return self.interpolate(self.index, t)
 
     def __call__(self, t, bisection=False, numpy=True):
+        if torch.is_tensor(t):
+            return torch_interp(t, self.t, self.x)
+            
         if numpy:
             return np.interp(t, self.t, self.x)
         else:

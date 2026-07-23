@@ -21,20 +21,20 @@ def adaptive_loss(pred, target, q=0.9, eps=1e-8):
 
 
 
-def get_initial_var_ctx(model: Model):
+def get_initial_var_ctx(model: Model, *, dtype: torch.dtype, device: torch.device):
     """
     Creates a torch tensor context with initial values of the variables.
     """
-    # initial variables are constants - no need for grads
-    ans =  [0] * len(model.endo_index)#torch.zeros(len(model.endo_index))
+    # torchode expects (batch_size, state_size). Initial values are fixed, so
+    # they must not be optimization parameters.
+    ans = [0.0] * len(model.endo_index)
     
     for var_name, index in model.endo_index.items():
         var = model.vars[var_name]
         if var.initial is None:
             raise ValueError(f"Variable {var_name} does not have an initial value defined.")
         ans[index] = var.initial
-    ans = torch.tensor(ans, requires_grad=True)
-    return ans.unsqueeze(1)
+    return torch.tensor(ans, dtype=dtype, device=device).unsqueeze(0)
 
 def simulate(model:Model, t_eval, const_ctx, initial_var_ctx, **kwargs):
     """
@@ -56,7 +56,18 @@ def simulate(model:Model, t_eval, const_ctx, initial_var_ctx, **kwargs):
     vars = model.get_endo_variables()
 
     def f(t, var_ctx):
-        derivatives : list[Any] = [0] * len(vars)  # initialize derivatives tensor
+        # torchode stores states as (batch, n_variables), whereas the PyBM
+        # model indexes variables along axis 0. Adapt at this boundary.
+        model_var_ctx = var_ctx.transpose(0, 1)
+        derivatives: list[Any] = []
+
+        # TimeSeries is NumPy-based. Evaluation times are inputs, not fitted
+        # parameters, therefore a Python scalar is appropriate here. The
+        # current PyBM variable interface supports one trajectory per solve.
+        if t.numel() != 1:
+            raise ValueError("Torch integration currently supports batch size 1.")
+        ode_t = float(t.detach().reshape(-1)[0])
+
         for var in vars:
             if var.ode is None:
                 raise ValueError(f"Variable {var.name} does not have an ODE defined.")
@@ -64,30 +75,35 @@ def simulate(model:Model, t_eval, const_ctx, initial_var_ctx, **kwargs):
                 raise ValueError(
                     f"Variable {var.name} has a Choose object as ODE. First use model.induce() to get a list of models without Choose objects."
                 )             
-            # compute and store new derivatives
-            #new_ctx = Context(vars=var_ctx, consts=const_ctx)
             new_ctx = {
-                "vars": var_ctx,
+                "vars": model_var_ctx,
                 "consts": const_ctx
             }
-            derivatives[var.index_in_ctx] = var.ode(t, new_ctx)
+            derivatives.append(var.ode(ode_t, new_ctx))
 
-        derivatives = torch.stack(derivatives)  # convert list to tensor
-        return derivatives
+        # One derivative vector per batch element: (batch, n_variables).
+        return torch.stack(derivatives, dim=-1)
 
     # prepare solver 
     term = to.ODETerm(f)
     step_method = to.Dopri5(term=term)
     step_size_controller = to.IntegralController(atol=1e-6, rtol=1e-3, term=term)
-    solver = to.AutoDiffAdjoint(step_method, step_size_controller)
+    # Do not let an unstable trial parameter vector consume unbounded memory
+    # or time during optimizer line searches.
+    solver = to.AutoDiffAdjoint(
+        step_method, step_size_controller, max_steps=10_000
+    )
 
     # fix times dimensions
-    if t_eval.dim() == 1:
-        t_eval = t_eval.unsqueeze(0)
+    t_eval = t_eval.reshape(1, -1)  # shape (1, n_time_points)
 
     # solve
     sol = solver.solve(to.InitialValueProblem(y0=initial_var_ctx, t_eval=t_eval))
 
+    if torch.any(sol.status != 0):
+        raise RuntimeError(
+            f"ODE solver failed with status {sol.status.detach().cpu().tolist()}."
+        )
     return sol
 
 
@@ -96,18 +112,27 @@ def get_data_matrix(*vars: Var, t_eval):
     Returns data as shape (n_vars, n_time_points).
     """
     t_eval = t_eval.reshape(-1)
-    data_matrix = torch.zeros((len(vars), len(t_eval)), dtype=torch.float64)
+    data_matrix = torch.empty(
+        (len(vars), len(t_eval)), dtype=t_eval.dtype, device=t_eval.device
+    )
 
     for i, var in enumerate(vars):
         if var.data is None:
             raise ValueError(f"Variable {var.name} does not have data defined.")
         for j, t in enumerate(t_eval):
-            data_matrix[i, j] = float(var.data(float(t)))
+            # Observations are stored in NumPy TimeSeries objects.
+            data_matrix[i, j] = float(var.data(float(t.detach())))
 
     return data_matrix
 
 
-def get_initial_const_ctx(model: Model, default: float | None = 1.0):
+def get_initial_const_ctx(
+    model: Model,
+    default: float | None = 1.0,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+):
     """
     Initial constant vector.
     """
@@ -124,7 +149,9 @@ def get_initial_const_ctx(model: Model, default: float | None = 1.0):
         else:
             const_ctx[const.index_in_ctx] = float(const.initial_value)
 
-    const_ctx = torch.tensor(const_ctx, requires_grad=True)
+    const_ctx = torch.tensor(
+        const_ctx, dtype=dtype, device=device, requires_grad=True
+    )
 
     return const_ctx
 
@@ -157,20 +184,31 @@ def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="me
         - "mean": Mean of squared residuals.
         - "adaptive": Adaptive loss function based on quantiles of residuals.
     """
+    if not isinstance(t_eval, torch.Tensor):
+        t_eval = torch.as_tensor(t_eval, dtype=torch.get_default_dtype())
+    if not torch.is_floating_point(t_eval):
+        t_eval = t_eval.to(torch.get_default_dtype())
+
     vars_ = model.get_endo_variables()
     t_eval = t_eval.reshape(-1)
     data = get_data_matrix(*vars_, t_eval=t_eval)
     # get initial values of variables
-    initial_var_ctx = get_initial_var_ctx(model)
+    initial_var_ctx = get_initial_var_ctx(
+        model, dtype=t_eval.dtype, device=t_eval.device
+    )
     # get initial values of constants
-    initial_const_ctx = get_initial_const_ctx(model)
+    initial_const_ctx = get_initial_const_ctx(
+        model, dtype=t_eval.dtype, device=t_eval.device
+    )
 
     # define objective function
     def objective(const_ctx):
         # calculate the whole trajectory
         sim = simulate(model, t_eval=t_eval, const_ctx=const_ctx, initial_var_ctx=initial_var_ctx)
         # extract 
-        pred = sim.ys.squeeze(-1)
+        # torchode returns (batch, n_times, n_variables); data is
+        # (n_variables, n_times).
+        pred = sim.ys.squeeze(0).transpose(0, 1)
         # compute residuals
         residuals = torch.ravel(pred - data)
         # compute mean squared error
@@ -183,10 +221,10 @@ def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="me
         return mse
 
     # minimize
-    if kwargs is None:
-        kwargs = {"lr": 0.1}
-    if "lr" not in kwargs:
-        kwargs["lr"] = 0.1
+    # Without a line search L-BFGS may propose huge rate constants. That makes
+    # the ODE stiff and used to look like an infinite loop in a notebook.
+    kwargs.setdefault("lr", 0.01)
+    kwargs.setdefault("line_search_fn", "strong_wolfe")
     optimizer = LBFGS([initial_const_ctx], **kwargs)
 
     def closure():
@@ -204,5 +242,3 @@ def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="me
         
 
     
-
-
