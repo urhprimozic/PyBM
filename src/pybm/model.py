@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 import torch
 from pybm.utils import torch_interp
+
 VarType = Literal["endo", "exo", "not_set"]
 Aggregation = Literal["sum", "product", "mean", "max", "min"]
 
@@ -31,13 +32,18 @@ class Model:
         self.endo_index: "dict[str, int]" = {}
         # dict between const names and index in ctx
         self.const_index: "dict[str, int]" = {}
-        self.context_size : int = 0
+        self.context_size: int = 0
 
         # collect data from args
         for arg in args:
             self.add(arg)
 
-    def add(self, arg: "Entity | Var | Const", ignore_conflicts: bool = False, set_as_active=True):
+    def add(
+        self,
+        arg: "Entity | Var | Const",
+        ignore_conflicts: bool = False,
+        set_as_active=True,
+    ):
         # add directly - no parent
         self.parents[arg.name] = None
         if isinstance(arg, Entity):
@@ -51,8 +57,8 @@ class Model:
                 if not ignore_conflicts:
                     raise ValueError(f"Element {arg.name} already exists in the model.")
             self.elements[arg.name] = arg
-            # set as active model 
-            if set_as_active:  
+            # set as active model
+            if set_as_active:
                 arg.active_model = self
             for key, value in arg._data.items():
                 new_name = f"{arg.name}.{key}"
@@ -206,7 +212,6 @@ class Model:
     def __repr__(self):
         return f"Model(Entities: {list(self.entities.values())}, Vars: {list(self.vars.values())}, Consts: {list(self.consts.values())})"
 
-
     def set_as_active(self):
         """
         Sets this model as the active model for all its entities, variables and constants.
@@ -221,6 +226,7 @@ class Model:
             var.active_model = self
         for const in self.consts.values():
             const.active_model = self
+
     def get_endo_variables(self):
         """
         Returns a list of all endogenous variables in the model.
@@ -263,7 +269,7 @@ class TimeSeries:
             return self.x[0]
         elif index >= len(self.t):
             return self.x[-1]
-        
+
         # linear interpolation
         if index == len(self.t) - 1:
             return self.x[index]
@@ -286,7 +292,7 @@ class TimeSeries:
     def __call__(self, t, bisection=False, numpy=True):
         if torch.is_tensor(t):
             return torch_interp(t, self.t, self.x)
-            
+
         if numpy:
             return np.interp(t, self.t, self.x)
         else:
@@ -311,8 +317,9 @@ class TimeSeries:
 
 
 class Context(TypedDict):
-    vars : Any
-    consts : Any
+    vars: Any
+    consts: Any
+
 
 @dataclass
 class Var:
@@ -321,16 +328,34 @@ class Var:
     It has a name and a type, which can be either 'endo' (endogenous) or 'exo' (exogenous).
 
     Endogenous variables are given by a formula (either ODE or algebraic). A model for an exogenus variable is not provided.
+
+    Parameters
+    ----------
+    name : str
+        The name of the variable.
+    type : VarType
+        The type of the variable. Can be either 'endo'  for endogenous variables (equation exists) or 'exo' for exogenous variables (not modelled).
+    initial : float | None
+        The initial value of the variable. Only used for endogenous variables.
+    range : tuple[float, float] | None
+        The range of the variable.
+    aggregation : Aggregation
+        The aggregation method for the endogenous variable. Can be either 'sum', 'product', 'mean', 'max' or 'min'. If process-based formalism is used,
+        aggregation method is used to combine the results of multiple processes that affect the same variable. For example, if two processes affect the same variable, and the aggregation method is 'sum', then the value of the variable will be the sum of the values from both processes.
+    data : TimeSeries | None
+        The data for the variable.
+    unit : str | None
+        The unit of the variable.
     """
 
     name: str
     type: VarType = "not_set"
     initial: float | None = None
     range: tuple[float, float] | None = None
-    aggregation: Aggregation | None = None
+    aggregation: Aggregation = "sum"
     unit: str | None = None
     ode: Callable[[Any, Any], Any] | "Choose" | None = None
-    algebraic: Callable[[Any], Any] | "Choose" | None = None
+    algebraic: Callable[[Any, Any], Any] | "Choose" | None = None
     active_model: "Model | None" = None
     data: TimeSeries | None = None
     index_in_ctx: int | None = None
@@ -338,6 +363,67 @@ class Var:
     def __post_init__(self):
         # add data
         super().__init__()
+        self.n_processes = (
+            0  # number of processes that affect this variable. Used for aggregation.
+        )
+
+    def append_ae(self, ae: Callable[[Any, Any], Any]):
+        """
+        Adds new algebraic equation to the variable and agregates it with the existing one using the aggregation method.
+        """
+        if self.algebraic is None:
+            self.algebraic = ae
+        else:
+            if self.aggregation == "sum":
+                old_ae = self.algebraic
+                self.algebraic = lambda t, ctx: old_ae(t, ctx) + ae(t, ctx)
+            elif self.aggregation == "product":
+                old_ae = self.algebraic
+                self.algebraic = lambda t, ctx: old_ae(t, ctx) * ae(t, ctx)
+            elif self.aggregation == "mean":
+                old_ae = self.algebraic
+                n = self.n_processes + 1
+                self.algebraic = (
+                    lambda t, ctx: (old_ae(t, ctx) * (n - 1) + ae(t, ctx)) / n
+                )
+            elif self.aggregation == "max":
+                old_ae = self.algebraic
+                self.algebraic = lambda t, ctx: max(old_ae(t, ctx), ae(t, ctx))
+            elif self.aggregation == "min":
+                old_ae = self.algebraic
+                self.algebraic = lambda t, ctx: min(old_ae(t, ctx), ae(t, ctx))
+            else:
+                raise ValueError(f"Unknown aggregation method {self.aggregation}.")
+        # increment the number of processes that affect this variable
+        self.n_processes += 1
+
+    def append_ode(self, ode: Callable[[Any, Any], Any]):
+        """
+        Adds new ode to the variable and agregates it with the existing one using the aggregation method.
+        """
+        if self.ode is None:
+            self.ode = ode
+        else:
+            if self.aggregation == "sum":
+                old_ode = self.ode
+                self.ode = lambda t, ctx: old_ode(t, ctx) + ode(t, ctx)
+            elif self.aggregation == "product":
+                old_ode = self.ode
+                self.ode = lambda t, ctx: old_ode(t, ctx) * ode(t, ctx)
+            elif self.aggregation == "mean":
+                old_ode = self.ode
+                n = self.n_processes + 1
+                self.ode = lambda t, ctx: (old_ode(t, ctx) * (n - 1) + ode(t, ctx)) / n
+            elif self.aggregation == "max":
+                old_ode = self.ode
+                self.ode = lambda t, ctx: max(old_ode(t, ctx), ode(t, ctx))
+            elif self.aggregation == "min":
+                old_ode = self.ode
+                self.ode = lambda t, ctx: min(old_ode(t, ctx), ode(t, ctx))
+            else:
+                raise ValueError(f"Unknown aggregation method {self.aggregation}.")
+        # increment the number of processes that affect this variable
+        self.n_processes += 1
 
     def __str__(self):
         return self.name
@@ -359,13 +445,13 @@ class Var:
             # read from data
             return self.get_exo(t)
         if self.type == "endo":
-            
+
             # compute - read from context
             index = self.index_in_ctx
             if index is None:
                 raise ValueError(f"Variable {self.name} has no index in context.")
-            
-            # read from context 
+
+            # read from context
             return ctx["vars"][index]
 
     def set_data(self, t, x):
@@ -407,7 +493,7 @@ class VarTemp:
     type: VarType = "not_set"
     initial: float = 0.0
     range: tuple[float, float] | None = None
-    aggregation: Aggregation | None = None
+    aggregation: Aggregation = "sum"
     unit: str | None = None
 
     def create(self):
@@ -478,7 +564,12 @@ class ConstTemp:
     unit: str | None = None
 
     def create(self):
-        return Const(name=self.name, initial_value=self.initial_value, range=self.range, unit=self.unit)
+        return Const(
+            name=self.name,
+            initial_value=self.initial_value,
+            range=self.range,
+            unit=self.unit,
+        )
 
 
 class Entity(MutableMapping):
@@ -701,30 +792,100 @@ class EntityTemp:
         return new_template
 
 
+@dataclass
+class Ode:
+    """
+    Represents an ordinary differential equation (ODE) in the model.
+    """
+
+    var: Var
+    func: Callable[[Any, Any], Any]
+
+    def __iter__(self):
+        yield self.var
+        yield self.func
+
+@dataclass
+class Algebraic:
+    """
+    Represents an algebraic equation in the model.
+    """
+
+    var: Var
+    func: Callable[[Any, Any], Any]
+
+    def __iter__(self):
+        yield self.var
+        yield self.func
+
+@dataclass
+class OdeTemp:
+    """
+    Represents an ordinary differential equation (ODE) in the model.
+    """
+
+    var_temp: VarTemp
+    func_temp: Callable[[Any, Any], Any]
+
+    def __iter__(self):
+        yield self.var_temp
+        yield self.func_temp
+
+
+@dataclass
+class AlgebraicTemp:
+    """
+    Represents an algebraic equation in the model.
+    """
+
+    var: VarTemp
+    func: Callable[[Any, Any], Any]
+
+    def __iter__(self):
+        yield self.var
+        yield self.func
+
+
 class Process:
-    def __init__(self, *args):
-        raise NotImplementedError("Process class is not implemented yet.")
+    def __init__(self, *args: list[Ode | Algebraic | Process]):
+        """
+        Creates a new process with the given ODEs, algebraic equations and sub-processes. Other properties (template, arguments, constants, equations and processes)
+        are collected implicitly.
+        """
+        self.odes: list[Ode] = []
+        self.aes: list[Algebraic] = []
+        self.processes: list[Process] = []
+
+        for arg in args:
+            if isinstance(arg, Ode):
+                self.odes.append(arg)
+            elif isinstance(arg, Algebraic):
+                self.aes.append(arg)
+            elif isinstance(arg, Process):
+                self.processes.append(arg)
+                # recursively collect data from the sub-process
+                self.odes.extend(arg.odes)
+                self.aes.extend(arg.aes)
+            else:
+                warnings.warn(
+                    f"Argument {arg} is not a valid process component. It will be ignored."
+                )
+
+    def compile(self):
+        """
+        Adds equations to the model.
+        """
+        for var, func in self.odes:
+            var.append_ode(func)
+        for var, func in self.aes:
+            var.append_ae(func)
 
 
 class ProcessTemplate:
-    def __init__(
-        self,
-        odes: List[Callable[[Any], Any]] | None = None,
-        aes: List[Callable[[Any], Any]] | None = None,
-        processes: List[ProcessTemplate | Process] | None = None,
-    ):
-        """
-        Creates a new process template with the given ODEs and algebraic equations.
-        The ODEs and algebraic equations are functions that take the entity as an argument and return the time derivative of the variable or the value of the algebraic equation.
-        """
-        self.odes = odes or []
-        self.aes = aes or []
-
-        # collect data
-        # collect EntityTemplates from this...
-
-        # not implemented!
-        raise NotImplementedError("ProcessTemplate class is not implemented yet.")
+    def __init__(self, *args : list[EntityTemp| VarTemp | ConstTemp | ProcessTemplate | OdeTemp | AlgebraicTemp | Any ]):
+        raise NotImplementedError("ProcessTemplate is not implemented yet.")
+                
+        
 
 
 class Choose:
@@ -735,3 +896,7 @@ class Choose:
     def __init__(self, *args: Callable[[Any], Any] | Any):
         self.options = args
 
+    def __call__(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Choose class is not meant to be called directly. Use model.induce() to generate all possible models with the different choices first."
+        )
