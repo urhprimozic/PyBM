@@ -1,9 +1,11 @@
 from logging import warning
-from typing import Any, cast
+from typing import Any, Literal, cast
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
 from pybm.model import Choose, Context, Model, Var
+from cma import fmin2
+
 
 def set_consts(model : Model, const_ctx : np.ndarray):
     """
@@ -134,10 +136,7 @@ def get_data_matrix(*vars: Var, t_eval):
 
     return data_matrix
 
-
-
-
-def estimate(model : Model, t_eval, return_old=False, verbose=0):
+def estimate_least_squares(model : Model, t_eval, return_old=False, verbose=0):
     """
     Estimate the constants of the model based on the data. 
 
@@ -187,3 +186,57 @@ def estimate(model : Model, t_eval, return_old=False, verbose=0):
     else:
         results = result.x, result.cost
     return results
+
+def estimate_cmaes(model : Model, t_eval, return_old=False, verbose=0, n_gen=50, sigma=10):
+    """
+    Estimate the constants of the model based on the data using CMA-ES optimization. 
+
+    Parameters
+    ----------
+    *vars : Var
+        List of endogenous variables. Each variable `var : Var` must have: 
+            - differential equation `var.ode(t, ctx)`  
+            - inital value `var.initial : float|Any`  
+            - Valid index in context `var.index_in_ctx : int`, obtained with adding the variable to the model
+            - data `var.data : array-like`, the observed data for the variable
+    t_eval : array-like, optional
+        Time points to evaluate and compute the solution.
+    """
+    # collect vars 
+    vars = model.get_endo_variables()
+    # get the data, that we want to fit the model to
+    data = get_data_matrix(*vars, t_eval=t_eval)
+    # initial context:
+    initial_ctx = get_initial_const_ctx(model)
+
+    def residuals(const_ctx):
+        # get predictions
+        sol = simulate(*vars, t_eval=t_eval, const_ctx=const_ctx)
+        pred = sol.y # of shape (n_vars, n_time_points)
+        return (pred - data ).ravel()
+
+    def fitness(const_ctx):
+        res = residuals(const_ctx)
+        return np.sum(res**2)
+    
+
+
+def estimate(model : Model, t_eval, return_old=False, verbose=0, method : Literal["least_squares", "cmaes"]="least_squares"):
+    """
+    Estimate the constants of the model based on the data. 
+
+    Parameters
+    ----------
+    *vars : Var
+        List of endogenous variables. Each variable `var : Var` must have: 
+            - differential equation `var.ode(t, ctx)`  
+            - inital value `var.initial : float|Any`  
+            - Valid index in context `var.index_in_ctx : int`, obtained with adding the variable to the model
+            - data `var.data : array-like`, the observed data for the variable
+    t_eval : array-like, optional
+        Time points to evaluate and compute the solution.
+    """
+    if method == "least_squares":
+        return estimate_least_squares(model, t_eval=t_eval, return_old=return_old, verbose=verbose)
+    else:
+        raise ValueError(f"Unknown estimation method: {method}")

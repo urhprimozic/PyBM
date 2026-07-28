@@ -21,7 +21,7 @@ class Model:
     Entities can communitate with a model.
     """
 
-    def __init__(self, *args: "Entity | Var | Const"):
+    def __init__(self, *args: "Entity | Var | Const", engine : Literal["scipy", "torch", "jax"] ="scipy" ):
         self.entities: "dict[str, Entity]" = {}
         self.vars: "dict[str, Var]" = {}
         self.consts: "dict[str, Const]" = {}
@@ -33,6 +33,7 @@ class Model:
         # dict between const names and index in ctx
         self.const_index: "dict[str, int]" = {}
         self.context_size: int = 0
+        self.engine : Literal["scipy", "torch", "jax"] = engine
 
         # collect data from args
         for arg in args:
