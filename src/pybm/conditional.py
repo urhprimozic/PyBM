@@ -10,13 +10,31 @@ class RelaxedIfElse:
     Smooth  if/elif/.../else. 
 
     
+    `RelaxedIfElse().If(value, expr)` is equivalent to `if value >= 0 : expr` in the limit of eps -> 0.
 
-    Pogoji se ne podajajo kot bool, ampak kot 'signed distance':
-        diff > 0  -> pogoj je (mehko) resničen
-        diff < 0  -> pogoj je (mehko) neresničen
-        diff = 0  -> na meji (utež = 0.5)
+    Usage
+    ------
+    ```
+    if t <= c:
+        expr1
+    elif t <= d:
+        expr2
+    else:
+        expr3 
+    ```
+    becomes
+    ```
+    RelaxedIfElse().If(c - t, expr1).Elif(d - t, expr2).Else(expr3)
+    ```
 
-    Primer: "if t <= c" postane diff = c - t
+    Parameters
+    ----------
+    eps : float
+        Relaxation parameter. Smaller values make the transition sharper, but supp(gradient) will be smaller.
+    method : str
+        Method for smoothing the transition. Options are "tanh", "erf", or "linear".
+    engine : str
+        Engine to use for computations. Options are "torch", "scipy", or "jax". The "torch" engine uses PyTorch tensors, the "scipy" engine uses NumPy.
     """
 
     def __init__(self, eps=1, method="tanh", engine:Literal["torch", "scipy", "jax"]= "scipy"):
@@ -37,11 +55,12 @@ class RelaxedIfElse:
             else:
                 raise NotImplementedError(f"Engine {self.engine} is not implemented for method {self.method}.")
         elif self.method == "erf":
+            sqrt2 = np.sqrt(2.0).item()
             if self.engine == "torch":
                 diff = torch.as_tensor(diff, dtype=torch.float32)
-                return 0.5 * (1 + torch.erf(diff / (self.eps * torch.sqrt(2))))
+                return 0.5 * (1 + torch.erf(diff / (self.eps *sqrt2)))
             elif self.engine == "scipy":
-                return 0.5 * (1 + scipy.special.erf(diff / (self.eps * np.sqrt(2))))
+                return 0.5 * (1 + scipy.special.erf(diff / (self.eps * sqrt2)))
             elif self.engine == "jax":
                 raise NotImplementedError("JAX engine is not implemented yet.")
             else:
