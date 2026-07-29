@@ -37,7 +37,7 @@ class RelaxedIfElse:
         Engine to use for computations. Options are "torch", "scipy", or "jax". The "torch" engine uses PyTorch tensors, the "scipy" engine uses NumPy.
     """
 
-    def __init__(self, eps : float | int = 1.0, method="tanh", engine:Literal["torch", "scipy", "jax"]= "scipy"):
+    def __init__(self, eps : float  = 0.01, method="tanh", engine:Literal["torch", "scipy", "jax"]= "scipy"):
         self.eps = eps
         self.method = method
         self._branches = []   # [(diff, value), ...] v vrstnem redu kot elif verige
