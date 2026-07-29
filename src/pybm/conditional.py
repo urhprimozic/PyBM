@@ -37,7 +37,7 @@ class RelaxedIfElse:
         Engine to use for computations. Options are "torch", "scipy", or "jax". The "torch" engine uses PyTorch tensors, the "scipy" engine uses NumPy.
     """
 
-    def __init__(self, eps=1, method="tanh", engine:Literal["torch", "scipy", "jax"]= "scipy"):
+    def __init__(self, eps : float | int = 1.0, method="tanh", engine:Literal["torch", "scipy", "jax"]= "scipy"):
         self.eps = eps
         self.method = method
         self._branches = []   # [(diff, value), ...] v vrstnem redu kot elif verige
@@ -49,18 +49,18 @@ class RelaxedIfElse:
         if self.method == "tanh":
             if self.engine == "torch":
                 diff = torch.as_tensor(diff, dtype=torch.float32)
-                return 0.5 * (1 + torch.tanh(diff / self.eps))
+                return 0.5 * (1 - torch.tanh(diff / self.eps))
             elif self.engine == "scipy":
-                return 0.5 * (1 + np.tanh(diff / self.eps))
+                return 0.5 * (1 - np.tanh(diff / self.eps))
             else:
                 raise NotImplementedError(f"Engine {self.engine} is not implemented for method {self.method}.")
         elif self.method == "erf":
             sqrt2 = np.sqrt(2.0).item()
             if self.engine == "torch":
                 diff = torch.as_tensor(diff, dtype=torch.float32)
-                return 0.5 * (1 + torch.erf(diff / (self.eps *sqrt2)))
+                return 0.5 * (1 - torch.erf(diff / (self.eps *sqrt2)))
             elif self.engine == "scipy":
-                return 0.5 * (1 + scipy.special.erf(diff / (self.eps * sqrt2)))
+                return 0.5 * (1 - scipy.special.erf(diff / (self.eps * sqrt2)))
             elif self.engine == "jax":
                 raise NotImplementedError("JAX engine is not implemented yet.")
             else:
@@ -68,9 +68,9 @@ class RelaxedIfElse:
         elif self.method == "linear":
             if self.engine == "torch":
                 diff = torch.as_tensor(diff, dtype=torch.float32)
-                return torch.clip((diff / self.eps + 1) / 2, 0.0, 1.0)
+                return torch.clip(( - diff / self.eps + 1) / 2, 0.0, 1.0)
             elif self.engine == "scipy":
-                return np.clip((diff / self.eps + 1) / 2, 0.0, 1.0)
+                return np.clip(( - diff / self.eps + 1) / 2, 0.0, 1.0)
             else:
                 raise NotImplementedError(f"Engine {self.engine} is not implemented for method {self.method}.")
         else:
