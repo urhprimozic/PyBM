@@ -1,3 +1,6 @@
+# CMA-ES files
+outcmaes/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
