@@ -3,6 +3,7 @@ from typing import Literal
 import torch
 import numpy as np
 import scipy
+import jax
 
 
 class RelaxedIfElse:
@@ -37,61 +38,71 @@ class RelaxedIfElse:
         Engine to use for computations. Options are "torch", "scipy", or "jax". The "torch" engine uses PyTorch tensors, the "scipy" engine uses NumPy.
     """
 
-    def __init__(self, eps : float  = 0.01, method="tanh", engine:Literal["torch", "scipy", "jax"]= "scipy"):
+    
+    def __init__(self, eps: float = 0.01, method="tanh",
+                 engine: Literal["torch", "scipy", "jax"] = "scipy"):
         self.eps = eps
         self.method = method
-        self._branches = []   # [(diff, value), ...] v vrstnem redu kot elif verige
+        self._branches = []
         self._default = None
         self.engine = engine
-
+ 
     def _weight(self, diff):
-        diff = np.asarray(diff, dtype=float)
-        if self.method == "tanh":
-            if self.engine == "torch":
-                diff = torch.as_tensor(diff, dtype=torch.float32)
+        # IMPORTANT: convert per-engine, BEFORE any numpy touches diff,
+        # otherwise jax tracers (under jit/grad/vmap) get silently broken.
+        if self.engine == "jax":
+            import jax.numpy as jnp
+            diff = jnp.asarray(diff)
+            if self.method == "tanh":
+                return 0.5 * (1 - jnp.tanh(diff / self.eps))
+            elif self.method == "erf":
+                import jax.scipy.special as jsp
+                sqrt2 = jnp.sqrt(2.0)
+                return 0.5 * (1 - jsp.erf(diff / (self.eps * sqrt2)))
+            elif self.method == "linear":
+                return jnp.clip((-diff / self.eps + 1) / 2, 0.0, 1.0)
+            else:
+                raise ValueError(f"neznana metoda: {self.method}")
+ 
+        elif self.engine == "torch":
+            diff = torch.as_tensor(diff, dtype=torch.float64)
+            if self.method == "tanh":
                 return 0.5 * (1 - torch.tanh(diff / self.eps))
-            elif self.engine == "scipy":
+            elif self.method == "erf":
+                sqrt2 = np.sqrt(2.0).item()
+                return 0.5 * (1 - torch.erf(diff / (self.eps * sqrt2)))
+            elif self.method == "linear":
+                return torch.clip((-diff / self.eps + 1) / 2, 0.0, 1.0)
+            else:
+                raise ValueError(f"neznana metoda: {self.method}")
+ 
+        elif self.engine == "scipy":
+            diff = np.asarray(diff, dtype=float)
+            if self.method == "tanh":
                 return 0.5 * (1 - np.tanh(diff / self.eps))
-            else:
-                raise NotImplementedError(f"Engine {self.engine} is not implemented for method {self.method}.")
-        elif self.method == "erf":
-            sqrt2 = np.sqrt(2.0).item()
-            if self.engine == "torch":
-                diff = torch.as_tensor(diff, dtype=torch.float32)
-                return 0.5 * (1 - torch.erf(diff / (self.eps *sqrt2)))
-            elif self.engine == "scipy":
+            elif self.method == "erf":
+                sqrt2 = np.sqrt(2.0).item()
                 return 0.5 * (1 - scipy.special.erf(diff / (self.eps * sqrt2)))
-            elif self.engine == "jax":
-                raise NotImplementedError("JAX engine is not implemented yet.")
+            elif self.method == "linear":
+                return np.clip((-diff / self.eps + 1) / 2, 0.0, 1.0)
             else:
-                raise ValueError(f"Unknown engine: {self.engine}")
-        elif self.method == "linear":
-            if self.engine == "torch":
-                diff = torch.as_tensor(diff, dtype=torch.float32)
-                return torch.clip(( - diff / self.eps + 1) / 2, 0.0, 1.0)
-            elif self.engine == "scipy":
-                return np.clip(( - diff / self.eps + 1) / 2, 0.0, 1.0)
-            else:
-                raise NotImplementedError(f"Engine {self.engine} is not implemented for method {self.method}.")
+                raise ValueError(f"neznana metoda: {self.method}")
         else:
-            raise ValueError(f"neznana metoda: {self.method}")
-
-    # ---- fluent API: If(...).Elif(...).Elif(...).Else(...) ----
+            raise ValueError(f"Unknown engine: {self.engine}")
+ 
     def If(self, diff, value):
         self._branches.append((diff, value))
         return self
-
+ 
     def Elif(self, diff, value):
         self._branches.append((diff, value))
         return self
-
+ 
     def Else(self, value):
         self._default = value
         return self._build()
-
+ 
     def _build(self):
-        # vsaka veja "porabi" samo tisto verjetnostno maso, ki je
-        # prejšnje veje še niso zajele -> pravi analog if/elif/else
         remaining = 1.0
         result = 0.0
         for diff, value in self._branches:
@@ -101,4 +112,5 @@ class RelaxedIfElse:
         if self._default is not None:
             result = result + remaining * self._default
         return result
+
     
