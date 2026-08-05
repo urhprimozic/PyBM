@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+from scipy.optimize import NonlinearConstraint, minimize
+from functools import lru_cache
 from logging import warning
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
@@ -100,10 +103,13 @@ def trajectory_offset(t, pred, *vars : Var):
     If no_data is True, the function returns the sum of squares of the predicted trajectory, which can be used to check for divergence.
     """
     # get true values at time t
-    if no_data(*vars):
-        true_values = np.zeros(len(vars), dtype=float)
-    else:
-        true_values = np.array([var.data(t) for var in vars], dtype=float)
+    true_values = np.zeros(len(vars), dtype=float)
+
+
+    if not no_data(*vars):
+        for var in vars:
+            assert var.data is not None, f"Variable {var.name} does not have data defined."
+            true_values[var.index_in_ctx] = var.data(t)
     return np.sum((pred - true_values)**2)
     
 
@@ -159,27 +165,98 @@ def simulate(*vars: Var, t_eval, const_ctx, var_ctx_size=None, initial_var_ctx=N
 
     
     if initial_var_ctx is None:
-        # initial values are retrieved from the data of the variables at time t_eval[0]. TODO this inherits noise!!
-        initial_values = var_ctx_from_time(*vars, t=t_eval[0], fixed_lenght=var_ctx_size)
+        # Use the model's declared initial values by default.
+        # If you want a data-driven seed for shooting, pass initial_var_ctx explicitly.
+        initial_values = minimal_var_ctx(*vars, set_initials=True, fixed_lenght=var_ctx_size)
     else:
         initial_values = initial_var_ctx
 
+    check_loss: Callable[[float, np.ndarray], float] | None
     if max_offset is not None:
-        # check if the loss exceeds the maximum allowed loss
-        def check_loss(t, y):
+        # check if the trajecory diverged 
+        def check_loss_fn(t, y):
             offset = trajectory_offset(t, y, *vars)
             verbose = kwargs.get("verbose", 0)
             if offset > max_offset and verbose > 0:
-                warning(f"Simulation stopped at time {t} due to exceeding maximum loss of {max_offset}. Current offset: {offset}.")
+                warning(f"Simulation stopped at time {t} due to exceeding maximal offset {max_offset}. Current offset: {offset}.")
             return max_offset - offset
-        check_loss.terminal = True
-        check_loss.direction = -1
+        check_loss_fn.terminal = True
+        check_loss_fn.direction = -1
+        check_loss = check_loss_fn
     else:
         check_loss = None
 
     # solve GRAD(vars) = F(t, ctx)
     sol = solve_ivp(fun=f, t_span=(t_eval[0], t_eval[-1]), y0=initial_values, t_eval=t_eval, events=check_loss, **kwargs)
     return sol
+
+
+def simulate_multishooting(
+    *vars: Var,
+    t_eval,
+    params,
+    n_consts: int,
+    n_subintervals: int,
+    max_offset=None,
+    dummy_value=1e10,
+    **kwargs,
+):
+    """
+    Reconstruct a stitched multiple-shooting trajectory from a flat parameter vector.
+
+    The parameter layout matches `estimate_scipy`:
+        [consts..., s_0, s_1, ..., s_{K-1}]
+    where each shooting state s_i is the initial state for subinterval i.
+
+    Returns a lightweight object with `.t` and `.y`, similar to the SciPy result.
+    """
+    params = np.asarray(params, dtype=float)
+    const_ctx = params[:n_consts]
+    initials = params[n_consts:]
+    sub_indices = np.linspace(0, len(t_eval) - 1, n_subintervals + 1, dtype=int)
+
+    stitched: np.ndarray | None = None
+
+    for i in range(n_subintervals):
+        t_sub_eval = t_eval[sub_indices[i] : sub_indices[i + 1] + 1]
+        initial_var_ctx = initials[i * len(vars) : (i + 1) * len(vars)]
+
+        if max_offset is None:
+            sol = simulate(
+                *vars,
+                t_eval=t_sub_eval,
+                const_ctx=const_ctx,
+                initial_var_ctx=initial_var_ctx,
+                **kwargs,
+            )
+        else:
+            sol = simulate(
+                *vars,
+                t_eval=t_sub_eval,
+                const_ctx=const_ctx,
+                initial_var_ctx=initial_var_ctx,
+                max_offset=max_offset,
+                **kwargs,
+            )
+
+        pred = sol.y
+        expected_shape = (len(vars), sub_indices[i + 1] - sub_indices[i] + 1)
+        if pred.shape != expected_shape:
+            if kwargs.get("verbose", 0) == 2:
+                warning(
+                    f"Simulation returned unexpected shape {pred.shape}. Expected {expected_shape}. Returning large residuals."
+                )
+            pred = np.full(expected_shape, dummy_value)
+
+        if stitched is None:
+            stitched = pred
+        else:
+            stitched = np.hstack((stitched, pred[:, 1:]))
+
+    if stitched is None:
+        stitched = np.zeros((len(vars), len(t_eval)), dtype=float)
+
+    return SimpleNamespace(t=np.asarray(t_eval, dtype=float), y=stitched, success=True, message="multiple-shooting reconstruction")
 
 def get_data_matrix(*vars: Var, t_eval):
     """
@@ -204,11 +281,14 @@ def get_data_matrix(*vars: Var, t_eval):
         if var.data is None:
             raise ValueError(f"Variable {var.name} does not have data defined.")
         for j, t in enumerate(t_eval):
-            data_matrix[i, j] = var.data(t)
+            value = var.data(t)
+            if value is None:
+                raise ValueError(f"Variable {var.name} returned no data at time {t}.")
+            data_matrix[i, j] = float(value)
 
     return data_matrix
 
-def estimate_least_squares(model : Model, t_eval, verbose=0, n_subintervals=1, dummy_value=1e10):
+def estimate_scipy(model : Model, t_eval, verbose=0, n_subintervals=1, dummy_value=1e10, method : Literal["least_squares", "constraints"]="constraints", max_iter=None, ignore_dim_warnings=True, gtol=1e-3, **kwargs):
     """
     Estimate the constants of the model based on the data. 
 
@@ -241,8 +321,8 @@ def estimate_least_squares(model : Model, t_eval, verbose=0, n_subintervals=1, d
     # divide t_eval into subintervals
     sub_indices = np.linspace(0, len(t_eval) - 1, n_subintervals + 1, dtype=int)
 
-    
-    def residuals(params):
+    # TODO cache!! 
+    def trajectory(params):
         # params are c1, c2, ...,cn, v1(t0), v2(t0), ..., vm(t0) , v1(t1), v2(t1), ..., vm(t1), ..., v1(tK), v2(tK), ..., vm(tK)
         # unpack 
         const_ctx = params[:n_consts]
@@ -258,12 +338,12 @@ def estimate_least_squares(model : Model, t_eval, verbose=0, n_subintervals=1, d
             # get initial var ctx for this subinterval
             initial_var_ctx = initials[i * len(vars):(i + 1) * len(vars)]
 
-            sol = simulate(*vars, t_eval=t_sub_eval, const_ctx=const_ctx, initial_var_ctx=initial_var_ctx)
+            sol = simulate(*vars, t_eval=t_sub_eval, const_ctx=const_ctx, initial_var_ctx=initial_var_ctx, verbose=verbose, **kwargs)
 
             pred = sol.y # of shape (n_vars, n_time_points)
 
             if pred.shape != (len(vars), sub_indices[i + 1] - sub_indices[i] + 1):
-                if verbose == 2:
+                if verbose == 2 and not ignore_dim_warnings:
                     warning(f"Simulation returned unexpected shape {pred.shape}. Expected {(len(vars), sub_indices[i + 1] - sub_indices[i] + 1)}. Returning large residuals.")
                 shape = sub_indices[i + 1] - sub_indices[i] + 1
                 pred =  np.full((len(vars), shape), dummy_value)
@@ -273,29 +353,53 @@ def estimate_least_squares(model : Model, t_eval, verbose=0, n_subintervals=1, d
             else:
                 all_pred = np.hstack((all_pred, pred[:, 1:]))  # skip the first point to avoid duplicates
 
-        # sol = simulate(*vars, t_eval=t_eval, const_ctx=const_ctx)
-        # pred = sol.y # of shape (n_vars, n_time_points)
-        return (all_pred - data ).ravel()
-    
+        residuals = (all_pred - data ).ravel()
+        residuals = np.linalg.norm(residuals)
+
+        smoothness_penalty = 0
+        for i in range(1, n_subintervals):
+            # get the last point of the previous subinterval and the first point of the current subinterval
+            last_point_prev = all_pred[:, sub_indices[i] - sub_indices[0]]
+            first_point_curr = all_pred[:, sub_indices[i] - sub_indices[0] + 1]
+            smoothness_penalty += np.linalg.norm((last_point_prev - first_point_curr)**2)
+        return residuals, smoothness_penalty
+    def residuals(params):
+        res, _ = trajectory(params)
+        return res
+    def constraints(params):
+        _, smoothness_penalty = trajectory(params)
+        return smoothness_penalty
+
     # get params 
     initial_params = initial_ctx 
     for index in sub_indices[:-1]:
         initial_var_ctx = var_ctx_from_time(*vars, t=t_eval[index], fixed_lenght=None)
         initial_params = np.concatenate((initial_params, initial_var_ctx))
-    result = least_squares(
+
+    if method == "least_squares":
+        result = least_squares(
             fun=residuals,
             x0=np.asarray(initial_params, dtype=float),
             method="trf",
             jac="2-point",
             verbose=verbose,
+            max_nfev=max_iter,
+            gtol=gtol,
+        )
+    elif method == "constraints":
+        result = minimize(
+            fun=lambda params: residuals(params),
+            x0=np.asarray(initial_params, dtype=float),
+            constraints=NonlinearConstraint(constraints, 0, 0),
+            method="trust-constr",
+            options={"maxiter": max_iter, "verbose":verbose, "gtol" : gtol},
         )
 
 
     const_to_value = {const.name: const_ctx for const, const_ctx in zip(model.consts.values(), result.x)}
 
 
-    results = result.x, result.cost
-    return results
+    return result
 
 def estimate_cmaes(model : Model, t_eval, return_old=False, verbose=0, n_gen=50, sigma=10):
     """
@@ -321,7 +425,7 @@ def estimate_cmaes(model : Model, t_eval, return_old=False, verbose=0, n_gen=50,
 
     def residuals(const_ctx):
         # get predictions
-        sol = simulate(*vars, t_eval=t_eval, const_ctx=const_ctx)
+        sol = simulate(*vars, t_eval=t_eval, const_ctx=const_ctx, verbose=verbose)
         pred = sol.y # of shape (n_vars, n_time_points)
         return (pred - data ).ravel()
 
@@ -331,7 +435,7 @@ def estimate_cmaes(model : Model, t_eval, return_old=False, verbose=0, n_gen=50,
     
 
 
-def estimate(model : Model, t_eval, return_old=False, verbose=0, method : Literal["least_squares", "cmaes"]="least_squares", n_subintervals=1):
+def estimate(model : Model, t_eval, return_old=False, verbose=0, method : Literal["least_squares","constraints", "cmaes"]="least_squares", n_subintervals=1, *args, **kwargs):
     """
     Estimate the constants of the model based on the data. 
 
@@ -353,6 +457,14 @@ def estimate(model : Model, t_eval, return_old=False, verbose=0, method : Litera
         Number of subintervals to use for the integration. The time interval will be divided into `n_subintervals` subintervals, and the ODE will be solved separately on each subinterval. This can improve the accuracy of the solution, especially for stiff ODEs.
     """
     if method == "least_squares":
-        return estimate_least_squares(model, t_eval=t_eval, n_subintervals=n_subintervals, verbose=verbose)
+        if verbose > 0:
+            print("Estimating constants using least squares optimization...")
+        return estimate_scipy(model, t_eval=t_eval, n_subintervals=n_subintervals, verbose=verbose, method="least_squares", *args, **kwargs)
+    elif method == "constraints":
+        if verbose > 0:
+            print("Estimating constants using constraints optimization...")
+        return estimate_scipy(model, t_eval=t_eval, n_subintervals=n_subintervals, verbose=verbose, method="constraints", *args, **kwargs)
+    elif method == "cmaes":
+        raise NotImplementedError("CMA-ES estimation is not implemented yet.")
     else:
         raise ValueError(f"Unknown estimation method: {method}")

@@ -5,6 +5,8 @@ final ODE of each population is their sum, which is the flattened form a
 ProBMoT process model should produce.
 """
 
+from typing_extensions import Literal
+
 import numpy as np
 from scipy.integrate import solve_ivp
 
@@ -24,7 +26,7 @@ PREDATION_RATE = 0.02
 CONVERSION_EFFICIENCY = 0.1
 
 
-def build_model() -> tuple[Model, dict[str, Var | Const]]:
+def build_model(engine : Literal["scipy", "torch", "jax"] = "scipy") -> tuple[Model, dict[str, Var | Const]]:
     """Build the model and return its named components."""
     # create variables
     n_prey = Var("n_prey", type="endo", initial=40.0)
@@ -46,6 +48,7 @@ def build_model() -> tuple[Model, dict[str, Var | Const]]:
         growth_rate_predator,
         predation_rate,
         conversion_efficiency,
+        engine=engine
     )
 
     # Process: temperature-dependent growth (or mortality for predator).
