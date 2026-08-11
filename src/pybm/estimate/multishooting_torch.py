@@ -552,6 +552,7 @@ def _estimate_constraints(
 @dataclass
 class WeightedSumResult:
     consts : torch.Tensor | Any # (B, n_consts), final constants for ALL candidates
+    x : torch.Tensor | Any # (B, n_consts + K*n_vars), final flat params for ALL candidates
     params: torch.Tensor  # (B, n_consts + K*n_vars), final params for ALL candidates
     traj_res: torch.Tensor  # (B,) final trajectory residual per candidate
     cont_res: torch.Tensor  # (B,) final continuity residual per candidate
@@ -672,6 +673,7 @@ def _estimate_weighted_sum(
 
     return WeightedSumResult(
         consts=params[:, :len(model.consts)].flatten().detach(),
+        x=params.detach().flatten(),
         params=params.detach(),
         traj_res=final_traj_res.detach(),
         cont_res=final_cont_res.detach(),
