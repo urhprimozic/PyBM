@@ -1,5 +1,6 @@
 # Proccess-based modeling formalisation in Python.
 # Types are used, but not enforced.
+from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
@@ -9,6 +10,10 @@ import warnings
 import numpy as np
 import torch
 from pybm.utils import torch_interp
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pybm.templates import EntityTemp, ProcessTemplate
 
 VarType = Literal["endo", "exo", "not_set"]
 Aggregation = Literal["sum", "product", "mean", "max", "min"]
@@ -21,7 +26,11 @@ class Model:
     Entities can communitate with a model.
     """
 
-    def __init__(self, *args: "Entity | Var | Const", engine : Literal["scipy", "torch", "jax"] ="scipy" ):
+    def __init__(
+        self,
+        *args: "Entity | Var | Const",
+        engine: Literal["scipy", "torch", "jax"] = "scipy",
+    ):
         self.entities: "dict[str, Entity]" = {}
         self.vars: "dict[str, Var]" = {}
         self.consts: "dict[str, Const]" = {}
@@ -33,7 +42,7 @@ class Model:
         # dict between const names and index in ctx
         self.const_index: "dict[str, int]" = {}
         self.context_size: int = 0
-        self.engine : Literal["scipy", "torch", "jax"] = engine
+        self.engine: Literal["scipy", "torch", "jax"] = engine
 
         # collect data from args
         for arg in args:
@@ -145,8 +154,53 @@ class Model:
             arg.index_in_ctx = len(self.const_index)
             self.const_index[arg.name] = len(self.const_index)
             self.context_size += 1
+        elif isinstance(arg, Process):
+            if arg.name in self.elements:
+                if not ignore_conflicts:
+                    raise ValueError(f"Element {arg.name} already exists in the model.")
+            self.elements[arg.name] = arg
+            self._register_process(arg, arg.name, ignore_conflicts, set_as_active)
+            # apply the process's equations to the affected variables (no-op if already compiled)
+            arg.compile()
         else:
             raise ValueError(f"Argument {arg} is not a valid model component.")
+
+    def _register_process(
+        self,
+        process: "Process",
+        full_name: str,
+        ignore_conflicts: bool,
+        set_as_active: bool,
+    ):
+        """
+        Registers a process's own local constants under `full_name.const_name`, then recurses into its
+        sub-processes using `full_name.sub_process_name` as their own prefix.
+        """
+        for const_name, const in process.own_consts.items():
+            new_name = f"{full_name}.{const_name}"
+            if new_name in self.consts:
+                if not ignore_conflicts:
+                    raise ValueError(
+                        f"Constant {new_name} already exists in the model."
+                    )
+            self.consts[new_name] = const
+            if new_name in self.elements:
+                if not ignore_conflicts:
+                    raise ValueError(f"Element {new_name} already exists in the model.")
+            self.elements[new_name] = const
+            if set_as_active:
+                const.active_model = self
+            const.index_in_ctx = len(self.const_index)
+            self.const_index[new_name] = len(self.const_index)
+            self.context_size += 1
+            self.parents[new_name] = full_name
+        for sub_process in process.processes:
+            self._register_process(
+                sub_process,
+                f"{full_name}.{sub_process.name}",
+                ignore_conflicts,
+                set_as_active,
+            )
 
     def copy(self):
         """
@@ -350,7 +404,7 @@ class Var:
     """
 
     name: str
-    type: VarType = "not_set"
+    type: VarType = "endo"
     initial: float | None = None
     range: tuple[float, float] | None = None
     aggregation: Aggregation = "sum"
@@ -468,7 +522,7 @@ class Var:
         """
         Returns a copy of the variable.
         """
-        return Var(
+        new_var = Var(
             name=self.name,
             type=self.type,
             initial=self.initial,
@@ -479,33 +533,14 @@ class Var:
             algebraic=self.algebraic,
             index_in_ctx=self.index_in_ctx,
         )
+        # n_processes isn't a dataclass field, so __post_init__ would otherwise reset it to 0 on every
+        # copy, desyncing "mean" aggregation's running count from how many terms are actually in `ode`/
+        # `algebraic`. Found via Process + Model.copy()/induce(), but it's a general Var.copy() gap.
+        new_var.n_processes = self.n_processes
+        return new_var
 
     def update(self, **kwargs):
         raise NotImplementedError()
-
-
-@dataclass(frozen=True)
-class VarTemp:
-    """
-    Variable specification DSL. Used to define a variable type in the entity template.
-    """
-
-    name: str
-    type: VarType = "not_set"
-    initial: float = 0.0
-    range: tuple[float, float] | None = None
-    aggregation: Aggregation = "sum"
-    unit: str | None = None
-
-    def create(self):
-        return Var(
-            name=self.name,
-            type=self.type,
-            initial=self.initial,
-            range=self.range,
-            aggregation=self.aggregation,
-            unit=self.unit,
-        )
 
 
 @dataclass
@@ -550,26 +585,6 @@ class Const:
             range=self.range,
             unit=self.unit,
             index_in_ctx=self.index_in_ctx,
-        )
-
-
-@dataclass(frozen=True)
-class ConstTemp:
-    """
-    Constant parameter specification DSL. Used to define a constant type in the entity template.
-    """
-
-    name: str
-    initial_value: float | Any = None
-    range: tuple[float, float] | None = None
-    unit: str | None = None
-
-    def create(self):
-        return Const(
-            name=self.name,
-            initial_value=self.initial_value,
-            range=self.range,
-            unit=self.unit,
         )
 
 
@@ -737,62 +752,6 @@ class Entity(MutableMapping):
         return new_entity
 
 
-class EntityTemp:
-    """
-    Entity template.
-    """
-
-    def __init__(self, *args: VarTemp | ConstTemp, parent: EntityTemp | None = None):
-        self._data = args
-        self.parent = parent
-
-    def __call__(self, name: str | None = None):
-        """
-        Creates an Entity instance from the template.
-        """
-        # generate new variables and constants from the template
-        generated_data = [obj.create() for obj in self._data]
-        # pack them into a new Entity. Remember to set self as a parent template
-        entity = Entity(*generated_data, name=name, template=self)
-        return entity
-
-    def variables(self):
-        """
-        Returns a list of variable names in the template.
-        """
-        return [obj.name for obj in self._data if isinstance(obj, VarTemp)]
-
-    def constants(self):
-        """
-        Returns a list of constant names in the template.
-        """
-        return [obj.name for obj in self._data if isinstance(obj, ConstTemp)]
-
-    def params(self):
-        """
-        Returns a list of parameter names in the template.
-        """
-        return [obj.name for obj in self._data]
-
-    def add(self, obj: VarTemp | ConstTemp):
-        """
-        Adds a variable or constant to the entity template.
-        """
-        if isinstance(obj, VarTemp) or isinstance(obj, ConstTemp):
-            self._data += (obj,)
-        else:
-            raise ValueError(f"Argument {obj} is not a VarTemp or ConstTemp.")
-
-    @staticmethod
-    def inherits(entity_template: EntityTemp):
-        """
-        Creates an entity template from an existing template
-        All the data is copied, but the template is not linked to the entity.
-        """
-        new_template = EntityTemp(*entity_template._data, parent=entity_template)
-        return new_template
-
-
 @dataclass
 class Ode:
     """
@@ -805,6 +764,7 @@ class Ode:
     def __iter__(self):
         yield self.var
         yield self.func
+
 
 @dataclass
 class Algebraic:
@@ -819,52 +779,38 @@ class Algebraic:
         yield self.var
         yield self.func
 
-@dataclass
-class OdeTemp:
-    """
-    Represents an ordinary differential equation (ODE) in the model.
-    """
-
-    var_temp: VarTemp
-    func_temp: Callable[[Any, Any], Any]
-
-    def __iter__(self):
-        yield self.var_temp
-        yield self.func_temp
-
-
-@dataclass
-class AlgebraicTemp:
-    """
-    Represents an algebraic equation in the model.
-    """
-
-    var: VarTemp
-    func: Callable[[Any, Any], Any]
-
-    def __iter__(self):
-        yield self.var
-        yield self.func
-
 
 class Process:
-    def __init__(self, *args: list[Ode | Algebraic | Process]):
+    def __init__(
+        self,
+        *args: "Ode | Algebraic | Process | Const",
+        name: str | None = None,
+    ):
         """
-        Creates a new process with the given ODEs, algebraic equations and sub-processes. Other properties (template, arguments, constants, equations and processes)
-        are collected implicitly.
+        Creates a new process with the given ODEs, algebraic equations, sub-processes and local constants.
+        A process is meant to be handed to `Model`/`Model.add` directly - the model takes care of registering
+        the process's local constants and applying its equations to the affected variables; there is no need
+        to call `compile()` manually.
         """
         self.odes: list[Ode] = []
         self.aes: list[Algebraic] = []
         self.processes: list[Process] = []
+        self.own_consts: dict[str, Const] = {}
+        self._compiled = False
 
         for arg in args:
             if isinstance(arg, Ode):
                 self.odes.append(arg)
             elif isinstance(arg, Algebraic):
                 self.aes.append(arg)
+            elif isinstance(arg, Const):
+                self.own_consts[arg.name] = arg
             elif isinstance(arg, Process):
                 self.processes.append(arg)
-                # recursively collect data from the sub-process
+                # recursively collect equations from the sub-process. Local constants are NOT flattened here -
+                # they stay scoped to their own process to avoid name collisions between sibling sub-processes
+                # (e.g. two different reactions both having a local constant called "k"); Model.add() namespaces
+                # them per process instead.
                 self.odes.extend(arg.odes)
                 self.aes.extend(arg.aes)
             else:
@@ -872,21 +818,40 @@ class Process:
                     f"Argument {arg} is not a valid process component. It will be ignored."
                 )
 
+        if name is None:
+            warnings.warn(
+                "Process name is not set. Default name was used. In the future, this will raise an error."
+            )
+            name = f"Process_{id(self)}"
+        self.name = name
+
     def compile(self):
         """
-        Adds equations to the model.
+        Adds this process's equations to the affected variables. Idempotent - safe to call more than once
+        (e.g. when a model containing this process is copied/re-added), equations are only applied once.
         """
+        if self._compiled:
+            return
         for var, func in self.odes:
             var.append_ode(func)
         for var, func in self.aes:
             var.append_ae(func)
+        self._compiled = True
 
-
-class ProcessTemplate:
-    def __init__(self, *args : list[EntityTemp| VarTemp | ConstTemp | ProcessTemplate | OdeTemp | AlgebraicTemp | Any ]):
-        raise NotImplementedError("ProcessTemplate is not implemented yet.")
-                
-        
+    def copy(self):
+        """
+        Returns a copy of the process, with fresh copies of its own local constants (so a copied model can
+        assign them a new context index without mutating the original). The ODEs/AEs and sub-processes are
+        shared as-is - equation evaluation reads values by context index, not by object identity, exactly
+        like `Var.copy()` already relies on, so re-applying them is unnecessary and (per `compile()`) skipped.
+        """
+        new_consts = [const.copy() for const in self.own_consts.values()]
+        new_subprocesses = [process.copy() for process in self.processes]
+        new_process = Process(
+            *self.odes, *self.aes, *new_consts, *new_subprocesses, name=self.name
+        )
+        new_process._compiled = True
+        return new_process
 
 
 class Choose:
