@@ -62,7 +62,7 @@ from scipy.optimize import least_squares, minimize as scipy_minimize
 from torch.func import jacfwd
 
 from pybm.estimate.int_scipy import get_initial_const_ctx
-from pybm.estimate.multishooting_torch import _make_rhs
+from pybm.estimate.multishooting_torch import _make_rhs, uniform_sub_indices
 from pybm.model import Model, Var
 
 # ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ class GradientMatchingResult:
         device = device or torch.device("cpu")
         vars_ = self.model.get_endo_variables()
 
-        sub_indices = np.linspace(0, len(self.t_eval) - 1, n_subintervals + 1, dtype=int)
+        sub_indices = uniform_sub_indices(self.t_eval, n_subintervals)
         seed_times = self.t_eval[sub_indices[:-1]]
 
         seeds = np.zeros((n_subintervals, len(vars_)), dtype=float)
