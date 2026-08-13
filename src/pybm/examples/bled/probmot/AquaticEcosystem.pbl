@@ -1,0 +1,399 @@
+// A sample of the library for modeling population dynamics in aquatic ecosystems used in (Cerepnalkoski et al. 2012) which results in 1344 candidate models.
+
+
+library AquaticEcosystem;
+
+
+// Entity templates
+
+template entity EcosystemEntity {
+	vars:
+		conc { aggregation: sum; unit: "kg/m^3"; range: <0,10> };
+}
+
+template entity Population: EcosystemEntity {
+	vars:
+		tempGrowthLim { aggregation: product },
+		tempRespLim { aggregation: product },
+		tempMortLim { aggregation: product };
+}
+
+template entity PrimaryProducer: Population {
+	vars: 
+		nutrientLim { aggregation: product },
+		lightLim { aggregation: product },
+		growthRate;
+	consts: 
+		maxGrowthRate { range: <0.05,3>; unit: "1/(day)" };
+}
+
+template entity Zooplankton: Population {
+	vars:
+		phytoLim { aggregation: sum },
+		phytoSum { aggregation: sum };
+	consts: 
+		maxFiltrationRate { range: <0.01, 15>; unit: "m3/(mgZoo*day)" },
+		assimilationCoeff { range: <0,inf>; unit: "mgZoo/(mgAlgae)" };
+}
+
+template entity Nutrient: EcosystemEntity {
+	consts:
+		halfSaturation { range: <0,15>; unit: "mg/l" },
+		alpha { range: <0,inf>; unit: "mgAlgaeBiomass/mgZooBiomass" };
+}
+
+template entity Environment {
+	vars: temperature, light, flow;
+	consts: volume, depth, area;
+}
+
+
+// Process templates: Note that this example includes the subset of process templates used in (Cerepnalkoski et al. 2012)
+
+
+template process NutrientPrimaryProducerInteraction(pp: PrimaryProducer, ns: Nutrient<1, 100>, env: Environment ) {
+	processes:
+		LightInfluence(pp, env),
+		NutrientInfluence(pp, <n:ns>),
+		Growth(pp, ns, env),
+		RespirationPP(pp, ns, env);
+}
+
+
+// Temperature Influence on Growth
+
+template process TempGrowthInfluence(pop: Population, env: Environment) {}
+
+template process NoTempGrowthLim: TempGrowthInfluence {
+	equations:
+		pop.tempGrowthLim = 1;
+}
+
+template process TempGrowthLim: TempGrowthInfluence {
+	consts:
+		refTemp { range: <10, 22> },
+		minTemp { range: <0, 6> },
+		optTemp { range: <15, 25> };
+}
+
+template process LinearTempGrowthLim: TempGrowthLim {
+	equations:
+		pop.tempGrowthLim = env.temperature / refTemp;
+}
+
+
+// Temperature Influence on Respiration
+
+template process TempRespInfluence(pop: Population, env: Environment) {}
+
+template process NoTempRespLim: TempRespInfluence {
+	equations:
+		pop.tempRespLim = 1;
+}
+
+template process TempRespLim: TempRespInfluence {
+	consts:
+		refTemp { range: <10, 22> },
+		minTemp { range: <0, 6> },
+		optTemp { range: <15, 25> };
+}
+
+template process LinearTempRespLim: TempRespLim {
+	equations:
+		pop.tempRespLim = env.temperature / refTemp;
+}
+
+template process OptimalTempRespLim: TempRespLim {
+	equations:
+		pop.tempRespLim = exp(-2.3 * (env.temperature - optTemp) / optTemp);
+}
+
+
+// Temperature Influence on Mortality
+
+template process TempMortInfluence(pop: Population, env: Environment) {}
+
+template process NoTempMortLim: TempMortInfluence {
+	equations:
+		pop.tempRespLim = 1;
+}
+
+template process TempMortLim: TempMortInfluence {
+	consts:
+		refTemp { range: <10, 22> },
+		minTemp { range: <0, 6> },
+		optTemp { range: <15, 25> };
+}
+
+template process LinearTempMortLim: TempMortLim {
+	equations:
+		pop.tempRespLim = env.temperature / refTemp;
+}
+
+template process ExponentialTempMortLim: TempMortLim {
+	consts:
+		theta { range: <1.06, 1.13> };
+	equations:
+		pop.tempRespLim = pow(theta, env.temperature - refTemp);
+}
+
+template process OptimalTempMortLim: TempMortLim {
+	equations:
+		pop.tempRespLim = exp(-2.3 *( env.temperature - optTemp) / optTemp);
+}
+
+
+// Light Influence on Growth
+
+template process LightInfluence(pp: PrimaryProducer, env: Environment) {}
+
+template process NoLightLim: LightInfluence {
+	equations:
+		pp.lightLim = 1;
+}
+
+template process LightLim: LightInfluence {}
+
+template process MonodLightLim: LightLim {
+	consts:
+		halfSat { range: <0, 200> };
+	equations:
+		pp.lightLim = env.light / (env.light + halfSat);
+}
+
+template process OptimalLightLim: LightLim {
+	consts:
+		optLight { range: <100, 200> };
+	equations:
+		pp.lightLim = env.light * exp(- env.light / optLight + 1) / optLight;
+}
+
+
+// Nutrient Influence on Growth
+
+template process NutrientInfluence(pp: PrimaryProducer, n: Nutrient) {}
+
+template process NoNutrientLim: NutrientInfluence {
+	equations:
+		pp.nutrientLim = 1;
+}
+
+template process NutrientLim: NutrientInfluence {}
+
+template process MonodNutrientLim: NutrientLim {
+	equations:
+		pp.nutrientLim = n.conc / (n.conc + n.halfSaturation);
+}
+
+
+// Growth of Primary Producers
+
+template process Growth(pp: PrimaryProducer, ns: Nutrient<1, 100>, env: Environment) {
+	processes:
+		TempGrowthInfluence(pp, env), GrowthRate(pp, ns, env);
+	equations:
+		td(pp.conc) = pp.growthRate * pp.conc,
+		td(<n:ns>.conc) = -n.alpha * pp.growthRate * pp.conc;
+}
+
+template process GrowthRate(pp: PrimaryProducer, ns: Nutrient<1, 100>, env: Environment) {
+	equations:
+		pp.growthRate = pp.maxGrowthRate * pp.tempGrowthLim * pp.lightLim * pp.nutrientLim;
+}
+
+
+// Respiration of Primary Producers
+
+template process RespirationPP(pp: PrimaryProducer, ns: Nutrient<1, 100>, env: Environment) {}
+
+template process ExponentialRespirationPP: RespirationPP {
+	consts:
+		respRate { range: <0.0001, 2> };
+	equations:
+		td(pp.conc) = -respRate * pp.conc,
+		td(<n:ns>.conc) = respRate * pp.conc;
+}
+
+template process TempRespirationPP: RespirationPP {
+	processes:
+		TempRespInfluence(pp, env);
+}
+
+template process Temp1RespirationPP: TempRespirationPP {
+	consts:
+		respRate { range: <0.0001, 1> };
+	equations:
+		td(pp.conc) = -respRate * pp.conc * pp.tempRespLim,
+		td(<n:ns>.conc) = respRate * pp.conc * pp.tempRespLim;
+}
+
+template process Temp2RespirationPP: TempRespirationPP {
+	consts:
+		respRate { range: <0.0001, 1> };
+	equations:
+		td(pp.conc) = -respRate * pp.conc * pp.conc * pp.tempRespLim,
+		td(<n:ns>.conc) = respRate * pp.conc * pp.conc * pp.tempRespLim;
+	
+}
+
+
+// Mortality of Primary Producers
+
+template process MortalityPP(pp: PrimaryProducer, env: Environment) {
+	processes:
+		TempMortInfluence(pp, env);
+}
+
+template process ExponentialMortalityPP: MortalityPP {
+	consts:
+		mortRate { range: <0.0001, 2> };
+	equations:
+		td(pp.conc) = -mortRate * pp.conc;
+}
+
+template process TempMortalityPP: MortalityPP {
+	consts:
+		mortRate { range: <0.0001, 2> };
+	equations:
+		td(pp.conc) = -mortRate * pp.conc * pp.tempMortLim;
+}
+
+template process Temp2MortalityPP: MortalityPP {
+	consts:
+		mortRate { range: <0.0001, 2> };
+	equations:
+		td(pp.conc) = -mortRate * pp.conc * pp.conc * pp.tempMortLim;
+}
+
+
+// Zooplankton grazing on Primary Producers
+
+template process FeedsOn(zoo: Zooplankton, pps: PrimaryProducer<1,inf>, env: Environment){
+	processes: 
+		TempGrowthInfluence(zoo, env), PhytoLim(zoo, pps);
+}
+
+/*
+template process FeedsOnIngestion: FeedsOn {
+	equations:
+		td(zoo.conc) = zoo.assimilationCoeff  * zoo.maxIngestionRate * zoo.tempGrowthLim * zoo.conc * zoo.phytoLim,
+		td(<pp:pps>.conc) = - zoo.maxIngestionRate * zoo.tempGrowthLim * zoo.conc * zoo.phytoLim;
+}
+*/
+
+template process FeedsOnFiltration: FeedsOn {
+	equations:
+		td(zoo.conc) = zoo.assimilationCoeff * zoo.maxFiltrationRate * zoo.tempGrowthLim * zoo.conc * zoo.phytoSum * zoo.phytoLim,
+		td(<pp:pps>.conc) = - zoo.maxFiltrationRate * zoo.tempGrowthLim * zoo.conc * pp.conc * zoo.phytoLim;
+}
+
+template process PhytoLim(zoo: Zooplankton, pps: PrimaryProducer<1,inf>) {}
+
+template process NoPhytoLim: PhytoLim {
+	equations:
+		zoo.phytoLim = 1;
+}
+
+template process MonodPhytoLim: PhytoLim {
+	processes:
+		Summation(zoo, pps);
+	consts:
+		halfSaturation { range: <0, 20> };
+	equations:
+		zoo.phytoLim = zoo.phytoSum / (halfSaturation + zoo.phytoSum);
+}
+
+template process Monod2PhytoLim: PhytoLim {
+	processes:
+		Summation(zoo, pps);
+	consts:
+		halfSaturation {range: <0, 20> };
+	equations: 
+		zoo.phytoLim = zoo.phytoSum * zoo.phytoSum / (zoo.phytoSum * zoo.phytoSum + halfSaturation);
+}
+
+template process ExponentialPhytoLim: PhytoLim {
+	processes:
+		Summation(zoo, pps);
+	consts:
+		saturationRate {range: <0, 5> };
+	equations:
+		zoo.phytoLim = 1 - exp(-saturationRate * zoo.phytoSum);
+}
+
+template process Summation(zoo: Zooplankton, pps: PrimaryProducer<1,inf>) {
+	equations:
+		zoo.phytoSum = <pp:pps>.conc;
+}
+
+
+// Respiration of Zooplankton
+
+template process RespirationZoo(zoo: Zooplankton, ns: Nutrient<1,inf>, env: Environment) {
+	processes:
+		TempRespInfluence(zoo, env);
+}
+
+template process ExponentialRespirationZoo: RespirationZoo {
+	consts:
+		respirationRate { range: <0.001, 1.5> };
+	equations:
+		td(zoo.conc) = -respirationRate * zoo.conc,
+		td(<n:ns>.conc) = respirationRate * zoo.conc;
+}
+
+template process TempRespirationZoo: RespirationZoo {
+	consts:
+		respirationRate { range: <0.001, 1.5> };
+	equations:
+		td(zoo.conc) = -respirationRate * zoo.tempRespLim * zoo.conc,
+		td(<n:ns>.conc) = respirationRate * zoo.conc;
+}
+
+template process Temp2RespirationZoo: RespirationZoo {
+	consts:
+		respirationRate { range: <0.001, 1.5> };
+	equations:
+		td(zoo.conc) = -respirationRate * zoo.tempRespLim * zoo.conc * zoo.conc,
+		td(<n:ns>.conc) = respirationRate * zoo.conc * zoo.conc;
+}
+
+
+// Mortality of Zooplankton
+
+template process MortalityZoo(zoo: Zooplankton) {}
+
+template process ExponentialMortalityZoo: MortalityZoo {
+	consts:
+		mortRate { range: <0.0001, 2> };
+	equations:
+		td(zoo.conc) = -mortRate * zoo.conc;
+}
+
+template process TempMortalityZoo(env: Environment): MortalityZoo {
+	consts:
+		mortRate { range: <0.0001, 2> };
+	equations:
+		td(zoo.conc) = -mortRate * zoo.conc * zoo.tempMortLim;
+}
+
+template process Temp2MortalityZoo: MortalityZoo {
+	consts:
+		mortRate { range: <0.0001, 2> };
+	equations:
+		td(zoo.conc) = -mortRate * zoo.conc * zoo.conc * zoo.tempMortLim;
+}
+
+template process HyperbolicMortalityZoo: MortalityZoo {
+	consts:
+		decay { range: <0.001, 1.5> };
+	equations:
+		td(zoo.conc) = -zoo.conc * zoo.conc * decay /( decay + zoo.conc);
+}
+
+template process SigmoidMortalityZoo: MortalityZoo {
+	consts:
+		decay { range: <0.001, 1.5> };
+	equations:
+		td(zoo.conc) = -zoo.conc * zoo.conc * zoo.conc * decay / (decay * decay + zoo.conc * zoo.conc);	
+}

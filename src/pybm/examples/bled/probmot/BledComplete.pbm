@@ -1,0 +1,121 @@
+model BledComplete : AquaticEcosystem;
+
+entity ortp : Nutrient {
+	vars:
+		conc { role: exogenous;};
+	consts:
+		alpha = 0,
+		halfSaturation = 0.5604633993464766;
+}
+
+entity no : Nutrient {
+	vars:
+		conc { role: exogenous;};
+	consts:
+		alpha = 0,
+		halfSaturation = 0.005439851527049321;
+}
+
+entity silica : Nutrient {
+	vars:
+		conc { role: exogenous;};
+	consts:
+		alpha = 0,
+		halfSaturation = 4.239434744795273;
+}
+
+entity phyto : PrimaryProducer {
+	vars:
+		conc { role: endogenous; initial: 2.3002014225415075;},
+		nutrientLim { role: endogenous; initial: 0;},
+		lightLim { role: endogenous; initial: 0;},
+		growthRate { role: endogenous; initial: 0;},
+		tempGrowthLim { role: endogenous; initial: 0;},
+		tempRespLim { role: endogenous; initial: 0;},
+		tempMortLim { role: endogenous; initial: 0;};
+	consts:
+		maxGrowthRate = 3.0;
+}
+
+entity daph : Zooplankton {
+	vars:
+		conc { role: exogenous;},
+		phytoLim { role: endogenous; initial: 0;},
+		phytoSum { role: endogenous; initial: 0;},
+		tempGrowthLim { role: endogenous; initial: 0;},
+		tempRespLim { role: endogenous; initial: 0;},
+		tempMortLim { role: endogenous; initial: 0;};
+	consts:
+		maxFiltrationRate = 0.03737605860906343,
+		assimilationCoeff = 0;
+}
+
+entity env : Environment {
+	vars:
+		temperature { role: exogenous;},
+		light { role: exogenous;},
+		flow { role: exogenous;};
+	consts:
+		volume = 0.0,
+		depth = 10.0,
+		area = 0.0;
+}
+
+process nutrientPPInteraction(phyto, [ortp, silica, no], env) : NutrientPrimaryProducerInteraction {
+	processes:
+		lightInfluence19, nutrientInfluence561, nutrientInfluence563, nutrientInfluence451, growth, respirationPP381;
+}
+
+process growth(phyto, [ortp, silica, no], env) : Growth {
+	processes:
+		tempGrowthLim906, growthRate80;
+}
+
+process feedsOn(daph, phyto, env) : FeedsOnFiltration {
+	processes:
+		tempGrowthInfluence965, phytoLim930;
+}
+
+process lightInfluence19(phyto, env) : OptimalLightLim {
+	consts:
+		optLight = 100.49292986819768;
+}
+
+process nutrientInfluence561(phyto, ortp) : MonodNutrientLim {
+}
+
+process nutrientInfluence563(phyto, silica) : MonodNutrientLim {
+}
+
+process nutrientInfluence451(phyto, no) : MonodNutrientLim {
+}
+
+process tempGrowthLim906(phyto, env) : LinearTempGrowthLim {
+	consts:
+		refTemp = 10.0,
+		minTemp = 0,
+		optTemp = 0;
+}
+
+process growthRate80(phyto, [ortp, silica, no], env) : GrowthRate {
+}
+
+process respirationPP381(phyto, [ortp, silica, no], env) : Temp1RespirationPP {
+	consts:
+		respRate = 1.0E-4;
+	processes:
+		tempRespInfluence396;
+}
+
+process tempGrowthInfluence965(daph, env) : NoTempGrowthLim {
+}
+
+process phytoLim930(daph, phyto) : NoPhytoLim {
+}
+
+process tempRespInfluence396(phyto, env) : LinearTempRespLim {
+	consts:
+		refTemp = 15.60799148612582,
+		minTemp = 0,
+		optTemp = 0;
+}

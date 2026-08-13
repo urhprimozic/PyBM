@@ -1,0 +1,101 @@
+// Grammar for ProBMoT .pbl (library) and .pbm (model) files, shared - both file kinds parse with
+// the same grammar; the header statement tells the caller which kind it got.
+// Scope (see convert/probmot.py module docstring for what's NOT covered yet): entities, entity
+// templates (with inheritance), process templates (with inheritance, cardinality-typed roles,
+// nested processes, iterators, equations), process/entity instances, null (incomplete) parameters.
+// Compartments and incomplete process ARGUMENTS ([[],[...]] bound syntax) are not covered.
+
+start: header_stmt statement*
+
+header_stmt: "library" NAME ";"                    -> library_header
+           | "incomplete" "model" NAME ":" NAME ";" -> incomplete_model_header
+           | "model" NAME ":" NAME ";"              -> model_header
+
+statement: entity_template
+         | process_template
+         | entity_instance
+         | process_instance
+
+// --- templates (.pbl) ---
+
+entity_template: "template" "entity" NAME (":" NAME)? "{" entity_template_body "}"
+entity_template_body: (vars_temp_section | consts_temp_section)*
+vars_temp_section: "vars" ":" temp_decl ("," temp_decl)* ";"?
+consts_temp_section: "consts" ":" temp_decl ("," temp_decl)* ";"?
+temp_decl: NAME attr_block?
+
+process_template: "template" "process" NAME param_list? (":" NAME)? "{" process_template_body "}"
+param_list: "(" (param ("," param)*)? ")"
+param: NAME ":" NAME cardinality?
+cardinality: "<" bound ("," bound)? ">"
+
+process_template_body: (consts_temp_section | sub_processes_temp_section | equations_section)*
+sub_processes_temp_section: "processes" ":" sub_process_ref ("," sub_process_ref)* ";"?
+sub_process_ref: NAME "(" (proc_call_arg ("," proc_call_arg)*)? ")"
+proc_call_arg: NAME    -> call_arg_name
+             | iterator -> call_arg_iterator
+iterator: "<" NAME ":" NAME ">"
+
+equations_section: "equations" ":" equation ("," equation)* ";"?
+equation: diff_target "=" expr -> diff_equation
+        | alg_target "=" expr  -> alg_equation
+diff_target: "td" "(" ref "." NAME ")"
+alg_target: ref "." NAME
+ref: NAME     -> ref_name
+   | iterator -> ref_iterator
+
+// --- instances (.pbm) ---
+
+entity_instance: "entity" NAME ":" NAME "{" entity_instance_body "}"
+entity_instance_body: (vars_inst_section | consts_inst_section)*
+vars_inst_section: "vars" ":" inst_var_decl ("," inst_var_decl)* ";"?
+consts_inst_section: "consts" ":" inst_const_decl ("," inst_const_decl)* ";"?
+inst_var_decl: NAME attr_block?
+inst_const_decl: NAME attr_block? ("=" value)?
+
+process_instance: "process" NAME "(" (inst_call_arg ("," inst_call_arg)*)? ")" ":" NAME "{" process_instance_body "}"
+inst_call_arg: NAME                          -> inst_arg_single
+             | "[" (NAME ("," NAME)*)? "]"    -> inst_arg_set
+process_instance_body: (consts_inst_section | sub_processes_inst_section)*
+sub_processes_inst_section: "processes" ":" NAME ("," NAME)* ";"?
+
+// --- shared bits ---
+
+attr_block: "{" attr (";" attr)* ";"? "}"
+attr: NAME ":" attr_value
+?attr_value: STRING
+          | range
+          | value
+          | NAME
+range: "<" bound "," bound ">"
+?bound: SIGNED_NUMBER
+     | "inf"  -> inf_bound
+     | "-inf" -> neg_inf_bound
+value: SIGNED_NUMBER -> num_value
+     | "null"        -> null_value
+
+// --- expressions ---
+
+?expr: expr "+" term -> add
+     | expr "-" term -> sub
+     | term
+?term: term "*" unary -> mul
+     | term "/" unary -> div
+     | unary
+?unary: "-" unary -> neg
+      | atom
+atom: SIGNED_NUMBER                        -> number
+    | "inf"                                -> inf_
+    | NAME "(" (expr ("," expr)*)? ")"     -> func_call
+    | ref "." NAME                         -> dotted
+    | NAME                                 -> name
+    | "(" expr ")"                         -> paren
+
+STRING: /"[^"]*"/
+NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+%import common.SIGNED_NUMBER
+%import common.WS
+%ignore WS
+%ignore /\/\/[^\n]*/
+%ignore /\/\*(.|\n)*?\*\//

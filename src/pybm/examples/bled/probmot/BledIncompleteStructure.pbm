@@ -1,0 +1,62 @@
+incomplete model BledIncompleteStructure: AquaticEcosystem;
+
+entity ortp: Nutrient {
+	vars: conc;
+	consts: alpha = null, halfSaturation = null;
+}
+
+entity no: Nutrient {
+	vars: conc;
+	consts: alpha = null, halfSaturation = null;
+}
+
+entity silica: Nutrient {
+	vars: conc;
+	consts: alpha = null, halfSaturation = null;
+}
+
+entity phyto: PrimaryProducer {
+	vars:
+		conc { role:endogenous; initial:null },
+		nutrientLim { role:endogenous },
+		lightLim { role:endogenous },
+		growthRate { role:endogenous },
+		tempGrowthLim { role:endogenous },
+		tempRespLim { role:endogenous },
+		tempMortLim { role:endogenous };
+	consts:
+		maxGrowthRate = null;
+}
+
+entity daph: Zooplankton {
+	vars:
+		conc { role: exogenous },
+		phytoLim { role: endogenous },
+		phytoSum { role: endogenous },
+		tempGrowthLim { role: endogenous },
+		tempRespLim { role: endogenous },
+		tempMortLim { role: endogenous };
+	consts:
+		maxFiltrationRate = null,
+		assimilationCoeff;
+}
+
+entity env: Environment {
+	vars: temperature, light, flow;
+	consts: volume = 0, depth = 10, area = 0;
+}
+
+process nutrientPPInteraction(phyto, [ortp, silica, no], env): NutrientPrimaryProducerInteraction {
+	processes:
+		LightInfluence, NutrientInfluence, NutrientInfluence, NutrientInfluence, growth, RespirationPP;
+}
+
+process growth(phyto, [ortp, silica, no], env): Growth {
+	processes:
+		TempGrowthLim, GrowthRate;
+}
+
+process feedsOn(daph, [phyto], env): FeedsOn {
+	processes:
+		TempGrowthInfluence, PhytoLim;
+}

@@ -28,7 +28,7 @@ class Model:
 
     def __init__(
         self,
-        *args: "Entity | Var | Const",
+        *args: "Entity | Var | Const | Process | ChooseProcess",
         engine: Literal["scipy", "torch", "jax"] = "scipy",
     ):
         self.entities: "dict[str, Entity]" = {}
@@ -43,6 +43,8 @@ class Model:
         self.const_index: "dict[str, int]" = {}
         self.context_size: int = 0
         self.engine: Literal["scipy", "torch", "jax"] = engine
+        # ChooseProcess slots added to the model but not yet resolved by induce() - see ChooseProcess
+        self.pending_process_choices: "dict[str, ChooseProcess]" = {}
 
         # collect data from args
         for arg in args:
@@ -50,7 +52,7 @@ class Model:
 
     def add(
         self,
-        arg: "Entity | Var | Const",
+        arg: "Entity | Var | Const | Process | ChooseProcess",
         ignore_conflicts: bool = False,
         set_as_active=True,
     ):
@@ -162,6 +164,15 @@ class Model:
             self._register_process(arg, arg.name, ignore_conflicts, set_as_active)
             # apply the process's equations to the affected variables (no-op if already compiled)
             arg.compile()
+        elif isinstance(arg, ChooseProcess):
+            # structure is still undetermined - don't register consts/compile yet, just remember the
+            # slot. Model.induce() resolves it into a concrete Process later.
+            if arg.name in self.pending_process_choices:
+                if not ignore_conflicts:
+                    raise ValueError(
+                        f"ChooseProcess {arg.name} already exists in the model."
+                    )
+            self.pending_process_choices[arg.name] = arg
         else:
             raise ValueError(f"Argument {arg} is not a valid model component.")
 
@@ -211,8 +222,11 @@ class Model:
         # make sure to first add the entities! If you first add all the variables,
         # the entities will not be properly initialized?? TODO try
         for entity in self.entities.values():
-            entity_copy = entity.copy(active_model=new_model)
-            new_model.add(entity_copy, ignore_conflicts=True)
+            # Entity.__init__ already self-registers into `active_model` (see its last line) - do
+            # NOT also call new_model.add() here, that would register it a second time and silently
+            # corrupt index_in_ctx for its vars/consts (add() reassigns the index unconditionally,
+            # even when ignore_conflicts=True suppresses the "already exists" error).
+            entity.copy(active_model=new_model)
         for obj_name, obj in self.elements.items():
             if self.parents[obj_name] is not None:
                 # this object is already added as part of an entity, skip it
@@ -222,6 +236,8 @@ class Model:
             else:
                 obj_copy = obj.copy() if hasattr(obj, "copy") else obj
             new_model.add(obj_copy, ignore_conflicts=True)
+        for choose_process in self.pending_process_choices.values():
+            new_model.add(choose_process.copy(), ignore_conflicts=True)
         return new_model
 
     def induce(self):
@@ -237,8 +253,12 @@ class Model:
         while models:
             current_model = models.popleft()
 
-            # check for any choices
-            finished = True
+            # Resolve exactly ONE ambiguity per step (then requeue the branches for the next pass),
+            # rather than every ambiguity found in this model at once: branching on N independent
+            # choices simultaneously produces the same fully-resolved combination via multiple
+            # different orderings, duplicating entries in finished_models. One-at-a-time avoids that.
+            resolved_choice = False
+
             for var_name, var in current_model.vars.items():
                 if var.ode is not None:
                     attr = "ode"
@@ -249,15 +269,33 @@ class Model:
                 expr = getattr(var, attr)
 
                 if isinstance(expr, Choose):
-                    # append new models
                     for option in expr.options:
                         new_model = current_model.copy()
                         setattr(new_model.vars[var_name], attr, option)
                         models.append(new_model)
-                    # this model is not finished
-                    finished = False
-            # no new models were created, so this model has no more choices and is finished
-            if finished:
+                    resolved_choice = True
+                    break
+
+            if not resolved_choice:
+                for slot_name, choose_process in current_model.pending_process_choices.items():
+                    for factory in choose_process.options:
+                        new_model = current_model.copy()
+                        del new_model.pending_process_choices[slot_name]
+                        # build the candidate fresh, against new_model's OWN (already-copied)
+                        # entities - see ChooseProcess's docstring for why a pre-built Process can't
+                        # be reused here.
+                        resolved = factory(new_model)
+                        # registered under the SLOT's name, not whatever name the factory gave it -
+                        # the slot name is what's stable across candidates (e.g. matches a `.pbm`
+                        # process instance name), regardless of which one wins.
+                        resolved.name = slot_name
+                        new_model.add(resolved)
+                        models.append(new_model)
+                    resolved_choice = True
+                    break
+
+            # no ambiguity left to resolve - this model is finished
+            if not resolved_choice:
                 finished_models.append(current_model)
         return finished_models
 
@@ -531,6 +569,7 @@ class Var:
             unit=self.unit,
             ode=self.ode,
             algebraic=self.algebraic,
+            data=self.data,
             index_in_ctx=self.index_in_ctx,
         )
         # n_processes isn't a dataclass field, so __post_init__ would otherwise reset it to 0 on every
@@ -866,3 +905,44 @@ class Choose:
         raise NotImplementedError(
             "Choose class is not meant to be called directly. Use model.induce() to generate all possible models with the different choices first."
         )
+
+
+class ChooseProcess:
+    """
+    Represents a structural choice between several candidate processes that could fill the same
+    named slot (e.g. several concrete process templates that all satisfy the same abstract process
+    template in a ProBMoT-style library). Deliberately separate from `Choose`, which stays scoped to
+    equation-level alternatives on `Var.ode`/`Var.algebraic` - a process is a whole bag of
+    equations/consts/sub-processes, not a single callable, so it needs its own container.
+
+    Candidates are given as *factories* - `Callable[[Model], Process]`, not already-built `Process`
+    objects. This matters: `Model.induce()` resolves a slot by copying the model (possibly more than
+    once, across branches), and a pre-built `Process`'s `Ode`/`Algebraic` entries and local `Const`s
+    would keep referencing the ORIGINAL (pre-copy) `Var`/`Const` objects - `Process.compile()` would
+    then mutate those stale objects instead of the ones actually living in the model being resolved,
+    silently leaving that model's variables without their equations. A factory sidesteps this by
+    building a brand new `Process` from scratch, each time, against the resolving model's own
+    `model.entities`/`model.elements` - exactly the entities that are actually live in that branch.
+
+    Add a `ChooseProcess` to a `Model` like any other component (`Model(entity, ChooseProcess(...))`);
+    it is *not* compiled/registered immediately (its structure is still undetermined) - instead
+    `Model.induce()` branches into one model per candidate, calling its factory with that branch's own
+    model and adding the resulting `Process` under this slot's name. Models with unresolved
+    `ChooseProcess`es are never "finished" for `induce()`'s purposes.
+    """
+
+    def __init__(self, *process_factories: "Callable[[Model], Process]", name: str | None = None):
+        self.options = process_factories
+        if name is None:
+            warnings.warn(
+                "ChooseProcess name is not set. Default name was used. In the future, this will raise an error."
+            )
+            name = f"ChooseProcess_{id(self)}"
+        self.name = name
+
+    def copy(self):
+        """
+        Factories are plain, stateless functions - safe to share across model copies as-is, unlike
+        `Process`/`Const`, which carry model-specific mutable state (`index_in_ctx` etc).
+        """
+        return ChooseProcess(*self.options, name=self.name)
