@@ -6,7 +6,7 @@ import torchode as to
 import numpy as np
 from torchmin import minimize # TODO doesnt work....
 from torch.optim import LBFGS
-from pybm.model import Choose, Context, Model, Var
+from pybm.model import Choose, Context, InducedModel, Var
 
 
 def adaptive_loss(pred, target, q=0.9, eps=1e-8):
@@ -21,22 +21,23 @@ def adaptive_loss(pred, target, q=0.9, eps=1e-8):
 
 
 
-def get_initial_var_ctx(model: Model, *, dtype: torch.dtype, device: torch.device):
+def get_initial_var_ctx(model: InducedModel, *, dtype: torch.dtype, device: torch.device):
     """
     Creates a torch tensor context with initial values of the variables.
     """
     # torchode expects (batch_size, state_size). Initial values are fixed, so
     # they must not be optimization parameters.
-    ans = [0.0] * len(model.endo_index)
-    
-    for var_name, index in model.endo_index.items():
-        var = model.vars[var_name]
+    vars_ = model.get_endo_variables()
+    ans = [0.0] * len(vars_)
+
+    for var in vars_:
         if var.initial is None:
-            raise ValueError(f"Variable {var_name} does not have an initial value defined.")
-        ans[index] = var.initial
+            raise ValueError(f"Variable {var.name} does not have an initial value defined.")
+        assert var.index_in_ctx is not None
+        ans[var.index_in_ctx] = var.initial
     return torch.tensor(ans, dtype=dtype, device=device).unsqueeze(0)
 
-def simulate(model:Model, t_eval, const_ctx, initial_var_ctx, **kwargs):
+def simulate(model: InducedModel, t_eval, const_ctx, initial_var_ctx, **kwargs):
     """
     Solve ODE for given endogenous variables using torchode.
 
@@ -127,7 +128,7 @@ def get_data_matrix(*vars: Var, t_eval):
 
 
 def get_initial_const_ctx(
-    model: Model,
+    model: InducedModel,
     default: float | None = 1.0,
     *,
     dtype: torch.dtype,
@@ -136,7 +137,7 @@ def get_initial_const_ctx(
     """
     Initial constant vector.
     """
-    const_ctx = [0] * len(model.const_index)
+    const_ctx = [0] * len(model.consts)
 
     for const_name, const in model.consts.items():
         if const.index_in_ctx is None:
@@ -165,7 +166,7 @@ def get_jit_estimate():
     return torch.compile(estimate)
      
 
-def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", opt:Literal["adam", "radam", "sgd", "lbfgs"]="lbfgs", **kwargs):
+def estimate(model: InducedModel, t_eval, loss : Literal["sum", "mean", "adaptive"]="mean", opt:Literal["adam", "radam", "sgd", "lbfgs"]="lbfgs", **kwargs):
     """
     Estimate constants with L-BFGS.
 
@@ -174,7 +175,7 @@ def estimate(model: Model, t_eval, loss : Literal["sum", "mean", "adaptive"]="me
 
     Parameters
     ----------
-    model : Model
+    model : InducedModel
         Model with defined variables, constants, and ODEs.
     t_eval : array-like
         Time points to evaluate and compute the solution.

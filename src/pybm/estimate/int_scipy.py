@@ -6,11 +6,11 @@ from typing import Any, Callable, Literal, cast
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
-from pybm.model import Choose, Context, Model, Var
+from pybm.model import Choose, Context, InducedModel, Var
 from cma import fmin2
 
 
-def set_consts(model : Model, const_ctx : np.ndarray):
+def set_consts(model : InducedModel, const_ctx : np.ndarray):
     """
     Set the values of the constants in the model based on the given context.
     """
@@ -20,11 +20,11 @@ def set_consts(model : Model, const_ctx : np.ndarray):
             raise ValueError(f"Constant {const.name} has no index in context.")
         const.initial_value = const_ctx[const.index_in_ctx]
 
-def get_initial_const_ctx(model : Model, default : float | None = 0.0):
+def get_initial_const_ctx(model : InducedModel, default : float | None = 0.0):
         """
         Returns the initial context for the constants in the model.
         """
-        const_ctx = np.zeros(len(model.const_index), dtype=float)
+        const_ctx = np.zeros(len(model.consts), dtype=float)
         for const_name, const in model.consts.items():
             if const.index_in_ctx is None:
                 raise ValueError(f"Constant {const.name} has no index in context.")
@@ -288,7 +288,7 @@ def get_data_matrix(*vars: Var, t_eval):
 
     return data_matrix
 
-def estimate_scipy(model : Model, t_eval, verbose=0, n_subintervals=1, dummy_value=1e10, method : Literal["least_squares", "constraints"]="constraints", max_iter=None, ignore_dim_warnings=True, gtol=1e-3, **kwargs):
+def estimate_scipy(model : InducedModel, t_eval, verbose=0, n_subintervals=1, dummy_value=1e10, method : Literal["least_squares", "constraints"]="constraints", max_iter=None, ignore_dim_warnings=True, gtol=1e-3, **kwargs):
     """
     Estimate the constants of the model based on the data. 
 
@@ -401,7 +401,7 @@ def estimate_scipy(model : Model, t_eval, verbose=0, n_subintervals=1, dummy_val
 
     return result
 
-def estimate_cmaes(model : Model, t_eval, return_old=False, verbose=0, n_gen=50, sigma=10):
+def estimate_cmaes(model : InducedModel, t_eval, return_old=False, verbose=0, n_gen=50, sigma=10):
     """
     Estimate the constants of the model based on the data using CMA-ES optimization. 
 
@@ -435,7 +435,7 @@ def estimate_cmaes(model : Model, t_eval, return_old=False, verbose=0, n_gen=50,
     
 
 
-def estimate(model : Model, t_eval, return_old=False, verbose=0, method : Literal["least_squares","constraints", "cmaes"]="least_squares", n_subintervals=1, *args, **kwargs):
+def estimate(model : InducedModel, t_eval, return_old=False, verbose=0, method : Literal["least_squares","constraints", "cmaes"]="least_squares", n_subintervals=1, *args, **kwargs):
     """
     Estimate the constants of the model based on the data. 
 

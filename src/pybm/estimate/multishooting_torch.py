@@ -82,7 +82,7 @@ import torch
 import torchode as to
 from scipy.optimize import NonlinearConstraint, minimize
 
-from pybm.model import Choose, Const, Context, Model, Var
+from pybm.model import Choose, Const, Context, InducedModel, Var
 
 
 # ---------------------------------------------------------------------------
@@ -90,47 +90,118 @@ from pybm.model import Choose, Const, Context, Model, Var
 # ---------------------------------------------------------------------------
 
 
-def _make_rhs(vars_: list[Var]) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+def _split_endo_vars(model: InducedModel) -> "tuple[list[Var], list[Var], dict[int, float]]":
     """
-    Builds the right-hand side f(t, y, const_ctx) that torchode integrates.
+    Splits `model`'s endogenous variables into differential ("state", actually integrated by
+    torchode), algebraic (re-derived at every RHS evaluation - see `_settle_algebraic`) and
+    "frozen" (neither an ODE nor an algebraic equation - held at their initial value for the
+    whole trajectory) - mirrors `pybm.simulate.predict.simulate`'s same three-way split, needed
+    here for the same reason: a real ProBMoT model can legitimately declare a variable that no
+    instantiated process ever writes an equation for (e.g. the chosen structural variant doesn't
+    need it).
+
+    Also validates that every equation has actually been resolved (`model.induce()` was called) -
+    a stray `Choose` this late means it wasn't.
+
+    Returns `(state_vars, algebraic_vars, frozen_values)`, where `frozen_values` maps a frozen
+    variable's `index_in_ctx` to the constant it should be held at.
+    """
+    all_vars = model.get_endo_variables()
+    state_vars = [var for var in all_vars if var.ode is not None]
+    algebraic_vars = [var for var in all_vars if var.ode is None and var.algebraic is not None]
+    frozen_vars = [var for var in all_vars if var.ode is None and var.algebraic is None]
+    for var in all_vars:
+        eq = var.ode if var.ode is not None else var.algebraic
+        if isinstance(eq, Choose):
+            raise ValueError(
+                f"Variable {var.name} still has an unresolved Choose() equation. Call "
+                "model.induce() to pick a concrete model before estimating."
+            )
+    frozen_values = {
+        var.index_in_ctx: (var.initial if var.initial is not None else 0.0) for var in frozen_vars
+    }
+    return state_vars, algebraic_vars, frozen_values
+
+
+def _settle_algebraic(
+    algebraic_vars: "list[Var]", t: torch.Tensor, var_slots: "dict[int, torch.Tensor]", const_ctx: torch.Tensor
+) -> "dict[int, torch.Tensor]":
+    """
+    torch/autograd-friendly analogue of `pybm.simulate.predict._settle_algebraic`: fills in
+    `algebraic_vars`' values via repeated fixed-point passes, since one algebraic variable can
+    depend on another (e.g. `growthRate` depends on `tempGrowthLim`/`nutrientLim`/`lightLim`,
+    themselves algebraic) and `Var`/`Process` don't expose a dependency graph to sort by.
+
+    Unlike `predict.py`'s version, this always runs the full, fixed `len(algebraic_vars) + 1`
+    passes (the same proven-sufficient bound for any acyclic dependency graph over that many
+    variables) instead of stopping early once nothing changes: this runs inside a batched,
+    autograd-tracked forward pass (and, for "weighted_sum", under a plain Python loop across
+    optimizer iterations too), where a data-dependent stopping condition would need a `.item()`
+    call - breaking the graph - and would make different rows of the batch take different numbers
+    of passes, which torch has no clean way to express. A fixed pass count sidesteps both.
+
+    `var_slots` is a dict `index_in_ctx -> (N,) tensor` (see `_make_rhs`) - updated out-of-place
+    each pass (a fresh dict, not a mutated one) for the same reason `_make_rhs` builds its
+    `derivatives` out-of-place: staying friendly to autograd / torch.compile.
+    """
+    for _ in range(len(algebraic_vars) + 1):
+        ctx: Context = {"vars": var_slots, "consts": const_ctx}
+        var_slots = dict(var_slots)
+        for var in algebraic_vars:
+            var_slots[var.index_in_ctx] = var.algebraic(t, ctx)
+    return var_slots
+
+
+def _make_rhs(
+    state_vars: "list[Var]", algebraic_vars: "list[Var]", frozen_values: "dict[int, float]"
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    """
+    Builds the right-hand side f(t, y, const_ctx) that torchode integrates - only `state_vars`
+    are actually integrated (`y`'s columns, in `state_vars` order); `algebraic_vars` are re-
+    derived from scratch at every call (`_settle_algebraic`) and `frozen_values` are held
+    constant, so that any state var's equation reading one of them (e.g. growth reading a
+    temperature-limitation factor) still sees a correct, current value.
 
     Shapes (N = mega-batch size = n_candidates * n_subintervals, flattened):
         t         : (N,)
-        y         : (N, n_vars)
+        y         : (N, len(state_vars))
         const_ctx : (N, n_consts)
     Returns:
-        dy/dt     : (N, n_vars)
+        dy/dt     : (N, len(state_vars))
 
-    We transpose y and const_ctx to (n_vars, N) / (n_consts, N) before
-    building the `Context` dict, because `Var.__call__` / `Const.__call__`
-    index into `ctx["vars"][index]` / `ctx["consts"][index]` with a plain
-    python int and expect back "the value of that single variable/constant
-    across the batch" -- i.e. shape (N,). That only works if the *feature*
-    axis is first, hence the transpose here (torchode itself always wants
-    the batch axis first, so we transpose right back on the way out via
-    `torch.stack(..., dim=-1)`).
+    `ctx["vars"]` is a dict `index_in_ctx -> (N,) tensor` (see `_settle_algebraic`) rather than a
+    dense array - `Var.__call__` only ever does `ctx["vars"][self.index_in_ctx]`, which a dict
+    supports identically to an array/list, and a dict sidesteps having to know/pre-allocate the
+    model's full endogenous-variable count here. `const_ctx` is still transposed to (n_consts, N)
+    so `Const.__call__`'s `ctx["consts"][index]` gets back the right (N,) shape.
     """
 
     def rhs(t: torch.Tensor, y: torch.Tensor, const_ctx_args: torch.Tensor) -> torch.Tensor:
-        var_ctx = y.T  # (n_vars, N) -> var_ctx[idx] has shape (N,)
         const_ctx = const_ctx_args.T  # (n_consts, N) -> const_ctx[idx] has shape (N,)
-        ctx: Context = {"vars": var_ctx, "consts": const_ctx}
+        batch_size = y.shape[0]
 
+        var_slots: "dict[int, torch.Tensor]" = {}
+        for i, var in enumerate(state_vars):
+            var_slots[var.index_in_ctx] = y[:, i]
+        for index, value in frozen_values.items():
+            var_slots[index] = torch.full((batch_size,), value, dtype=y.dtype, device=y.device)
+        # zero-valued placeholders for every algebraic slot, refined by _settle_algebraic below -
+        # without these, a first-pass read of an algebraic var that hasn't been computed yet (e.g.
+        # growthRate reading tempGrowthLim, both algebraic) would find no entry at all instead of
+        # a harmless 0.0 (see predict.py's dense, zero-initialized var_ctx for the same idea).
+        for var in algebraic_vars:
+            var_slots[var.index_in_ctx] = torch.zeros(batch_size, dtype=y.dtype, device=y.device)
+        var_slots = _settle_algebraic(algebraic_vars, t, var_slots, const_ctx)
+
+        ctx: Context = {"vars": var_slots, "consts": const_ctx}
         # Build derivatives out-of-place (via stack, not in-place index_put)
         # so we stay friendly to autograd / torch.compile.
-        batch_size = y.shape[0]
-        derivatives: list[torch.Tensor] = [torch.zeros(batch_size, dtype=y.dtype, device=y.device) for _ in vars_]
-        for var in vars_:
-            if var.ode is None:
-                raise ValueError(f"Variable {var.name} has no ODE defined.")
-            if isinstance(var.ode, Choose):
-                raise ValueError(
-                    f"Variable {var.name} still has an unresolved Choose() ODE. "
-                    "Call model.induce() to pick a concrete model before estimating."
-                )
-            assert var.index_in_ctx is not None
-            derivatives[var.index_in_ctx] = var.ode(t, ctx)
-        return torch.stack(derivatives, dim=-1)  # (N, n_vars)
+        derivatives: list[torch.Tensor] = [
+            torch.zeros(batch_size, dtype=y.dtype, device=y.device) for _ in state_vars
+        ]
+        for i, var in enumerate(state_vars):
+            derivatives[i] = var.ode(t, ctx)
+        return torch.stack(derivatives, dim=-1)  # (N, len(state_vars))
 
     return rhs
 
@@ -148,7 +219,9 @@ _DIVERGED_VALUE = 1e6
 
 
 def _make_solver(
-    vars_: list[Var],
+    state_vars: list[Var],
+    algebraic_vars: list[Var],
+    frozen_values: "dict[int, float]",
     atol: float,
     rtol: float,
     max_steps: Optional[int] = 2000,
@@ -182,7 +255,7 @@ def _make_solver(
     trajectory here is caught via `Solution.status` after the (bounded)
     solve returns, in `_solve_segments`, not interrupted mid-flight.
     """
-    term = to.ODETerm(_make_rhs(vars_), with_args=True)  # type: ignore[arg-type]
+    term = to.ODETerm(_make_rhs(state_vars, algebraic_vars, frozen_values), with_args=True)  # type: ignore[arg-type]
     step_method = to.Dopri5(term=term)
     step_size_controller = to.IntegralController(atol=atol, rtol=rtol, term=term, dt_min=dt_min)
     return to.AutoDiffAdjoint(step_method, step_size_controller, max_steps=max_steps)  # type: ignore[arg-type]
@@ -270,7 +343,7 @@ def _get_data_tensor(vars_: list[Var], t_eval: np.ndarray, device, dtype) -> tor
 
 
 def _prepare_problem(
-    model: Model,
+    model: InducedModel,
     t_eval: np.ndarray,
     n_subintervals: int,
     device,
@@ -281,16 +354,24 @@ def _prepare_problem(
     solver_max_steps: Optional[int] = 2000,
     solver_dt_min: Optional[float] = None,
 ):
-    """Shared setup for both estimate_torch methods: vars, grid, data, solver."""
-    vars_ = model.get_endo_variables()
-    n_vars = len(vars_)
+    """
+    Shared setup for both estimate_torch methods: vars, grid, data, solver. Only differential
+    ("state") variables are returned as `vars_`/integrated/compared against data - algebraic and
+    frozen variables are handled internally by the solver's RHS (see `_make_rhs`,
+    `_split_endo_vars`), never exposed as free/fitted quantities here.
+    """
+    state_vars, algebraic_vars, frozen_values = _split_endo_vars(model)
+    n_vars = len(state_vars)
     n_consts = len(model.consts)
 
     grid = _build_subinterval_grid(t_eval, n_subintervals, device, dtype, sub_indices=sub_indices)
-    data = _get_data_tensor(vars_, t_eval, device, dtype)
-    solver = _make_solver(vars_, solver_atol, solver_rtol, max_steps=solver_max_steps, dt_min=solver_dt_min)
+    data = _get_data_tensor(state_vars, t_eval, device, dtype)
+    solver = _make_solver(
+        state_vars, algebraic_vars, frozen_values, solver_atol, solver_rtol,
+        max_steps=solver_max_steps, dt_min=solver_dt_min,
+    )
 
-    return vars_, n_vars, n_consts, grid, data, solver
+    return state_vars, n_vars, n_consts, grid, data, solver
 
 
 def _solve_segments(
@@ -426,7 +507,7 @@ def _stitch_trajectory(ys: torch.Tensor, grid: _SubintervalGrid) -> torch.Tensor
 
 
 def _sample_initial_params(
-    model: Model,
+    model: InducedModel,
     t_eval: np.ndarray,
     n_subintervals: int,
     n_candidates: int,
@@ -445,7 +526,9 @@ def _sample_initial_params(
     replaces the naive uniform-random constants below with a fitted guess.
 
     Layout matches the scipy version: for each candidate, a flat vector
-    [c_1..c_n, v_1(t_0)..v_m(t_0), ..., v_1(t_K)..v_m(t_K)].
+    [c_1..c_n, v_1(t_0)..v_m(t_0), ..., v_1(t_K)..v_m(t_K)], where v_1..v_m are the model's
+    differential ("state") variables only - algebraic/frozen variables aren't part of `y` at all
+    (see `_split_endo_vars`), so there is nothing to seed for them.
 
     - Constants: candidate 0 uses `const.initial_value` (or the midpoint
       of `const.range`); the rest are drawn uniformly from `const.range`
@@ -456,7 +539,7 @@ def _sample_initial_params(
       un-jittered initial guess).
     """
     rng = np.random.default_rng(seed)
-    vars_ = model.get_endo_variables()
+    vars_, _, _ = _split_endo_vars(model)
     consts = list(model.consts.values())
     n_consts = len(consts)
     n_vars = len(vars_)
@@ -642,7 +725,7 @@ def _estimate_constraints_single(
 
 
 def _estimate_constraints(
-    model: Model,
+    model: InducedModel,
     t_eval: np.ndarray,
     n_subintervals: int,
     init_params_batch: torch.Tensor,  # (B, n_consts + K*n_vars)
@@ -739,7 +822,7 @@ def _homotopy_weight(start: float, end: float, frac: float, mode: Literal["linea
 
 
 def _estimate_weighted_sum(
-    model: Model,
+    model: InducedModel,
     t_eval: np.ndarray,
     n_subintervals: int,
     init_params_batch: torch.Tensor,  # (B, n_consts + K*n_vars), requires_grad set here
@@ -879,7 +962,7 @@ def _estimate_weighted_sum(
 
 
 def estimate_torch(
-    model: Model,
+    model: InducedModel,
     t_eval,
     method: Literal["constraints", "weighted_sum"] = "weighted_sum",
     n_subintervals: int = 1,
@@ -916,7 +999,7 @@ def estimate_torch(
 
     Parameters
     ----------
-    model : Model
+    model : InducedModel
         Must have been built with `engine="torch"`, with `Choose` objects
         already resolved (via `model.induce()`), and with every `Var.ode`
         written using differentiable torch operations.
@@ -939,7 +1022,10 @@ def estimate_torch(
     init_params : (B, n_consts + K*n_vars) tensor, optional
         Initial guesses, same flat layout as the scipy version:
         [c_1..c_n, v_1(t_0)..v_m(t_0), ..., v_1(t_K)..v_m(t_K)] per
-        candidate. If omitted, a naive multistart sampler is used (see
+        candidate, where v_1..v_m are the model's differential ("state")
+        variables only (see `_split_endo_vars`) - algebraic/frozen
+        variables have nothing to seed. If omitted, a naive multistart
+        sampler is used (see
         `_sample_initial_params`) -- for something better than uniform
         random constants, see `pybm.estimate.gradient_matching`, whose
         result's `.init_params(...)` builds exactly this layout.
@@ -994,7 +1080,7 @@ def estimate_torch(
     """
     if model.engine != "torch":
         raise ValueError(
-            f"estimate_torch requires a Model built with engine='torch', got engine={model.engine!r}."
+            f"estimate_torch requires an InducedModel built with engine='torch', got engine={model.engine!r}."
         )
 
     t_eval = np.asarray(t_eval, dtype=float)

@@ -21,11 +21,11 @@ from pybm.estimate.multishooting_torch import (
     _stitch_trajectory,
     uniform_sub_indices,
 )
-from pybm.model import Model
+from pybm.model import InducedModel
 
 
 def simulate_multishooting(
-    model: Model,
+    model: InducedModel,
     t_eval,
     params,
     n_subintervals: int,
@@ -50,7 +50,7 @@ def simulate_multishooting(
     """
     if model.engine != "torch":
         raise ValueError(
-            f"simulate_multishooting requires a Model built with engine='torch', got engine={model.engine!r}."
+            f"simulate_multishooting requires an InducedModel built with engine='torch', got engine={model.engine!r}."
         )
 
     vars_ = model.get_endo_variables()
@@ -90,7 +90,7 @@ def simulate_multishooting(
     )
 
 
-def simulate(model: Model, t_eval, consts, initial=None, **kwargs):
+def simulate(model: InducedModel, t_eval, consts, initial=None, **kwargs):
     """
     Single-shooting simulation: one global initial condition, forward-
     simulated across the WHOLE horizon with `consts` -- just
@@ -116,7 +116,7 @@ def simulate(model: Model, t_eval, consts, initial=None, **kwargs):
     return simulate_multishooting(model, t_eval, params, n_subintervals=1, **kwargs)
 
 
-def MSE(model: Model, t_eval, n_subintervals: int, consts, sub_indices: Optional[np.ndarray] = None, **kwargs) -> float:
+def MSE(model: InducedModel, t_eval, n_subintervals: int, consts, sub_indices: Optional[np.ndarray] = None, **kwargs) -> float:
     """
     Mean squared error between the observed data and an
     `n_subintervals`-segment reconstruction using `consts`, where every

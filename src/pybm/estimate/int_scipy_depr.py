@@ -3,7 +3,7 @@ from typing import Any, cast
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
-from pybm.model import Choose, Context, Model, Var
+from pybm.model_old import Choose, Context, Model, Var
 
 
 class Estimator:

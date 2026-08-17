@@ -4,7 +4,7 @@ python -m pybm.tests.test_choose_process
 No pytest dependency - matches the rest of the project, which has none either.
 """
 
-from pybm.model import Model, Entity, Var, Const, Process, ChooseProcess, Ode
+from pybm.model_old import Model, Entity, Var, Const, Process, ChooseProcess, Ode
 
 
 def make_growth_factory(name, entity_name, rate_value):
@@ -63,7 +63,7 @@ def test_induce_resolves_each_candidate_into_its_own_model():
 
 
 def test_choose_process_combines_with_var_level_choose():
-    from pybm.model import Choose
+    from pybm.model_old import Choose
 
     pop = Entity(
         Var("conc", type="endo", initial=1.0),

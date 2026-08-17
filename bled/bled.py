@@ -1,4 +1,4 @@
-from pybm.model import Model, Var, Const
+from pybm.model_old import Model, Var, Const
 
 model = Model()
 

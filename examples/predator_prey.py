@@ -10,7 +10,7 @@ from typing_extensions import Literal
 import numpy as np
 from scipy.integrate import solve_ivp
 
-from pybm.model import Const, Context, Model, Var
+from pybm.model_old import Const, Context, Model, Var
 
 
 # Temperature is a dimensionless multiplier, not degrees Celsius.  These

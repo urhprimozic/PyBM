@@ -61,9 +61,8 @@ from scipy.linalg import cho_factor, cho_solve
 from scipy.optimize import least_squares, minimize as scipy_minimize
 from torch.func import jacfwd
 
-from pybm.estimate.int_scipy import get_initial_const_ctx
-from pybm.estimate.multishooting_torch import _make_rhs, uniform_sub_indices
-from pybm.model import Model, Var
+from pybm.estimate.multishooting_torch import _make_rhs, _split_endo_vars, uniform_sub_indices
+from pybm.model import InducedModel, Var
 
 # ---------------------------------------------------------------------------
 # RBF kernel and its derivative cross-covariances (Solak et al., 2003)
@@ -169,9 +168,28 @@ def _fit_gp_1d(t_obs: np.ndarray, y_obs: np.ndarray, max_points: int, max_iter: 
 # ---------------------------------------------------------------------------
 
 
-def _const_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
-    lo = np.full(len(model.const_index), -np.inf)
-    hi = np.full(len(model.const_index), np.inf)
+def _initial_const_guess(model: InducedModel) -> np.ndarray:
+    """
+    Starting guess for the constant fit: `initial_value` where known, otherwise the midpoint of
+    `range` (falling back to 0.0 only when neither is available). A blanket 0.0 default (as
+    `int_scipy.get_initial_const_ctx` uses) can land a constant that appears as a divisor in some
+    equation (e.g. a `refTemp`) at exactly zero, which makes the very first residual evaluation
+    NaN/inf - `least_squares` refuses to even start from a point like that.
+    """
+    c0 = np.zeros(len(model.consts), dtype=float)
+    for const in model.consts.values():
+        if const.initial_value is not None:
+            c0[const.index_in_ctx] = const.initial_value
+        elif const.range is not None and np.isfinite(const.range[0]) and np.isfinite(const.range[1]):
+            c0[const.index_in_ctx] = 0.5 * (const.range[0] + const.range[1])
+        else:
+            c0[const.index_in_ctx] = 0.0
+    return c0
+
+
+def _const_bounds(model: InducedModel) -> tuple[np.ndarray, np.ndarray]:
+    lo = np.full(len(model.consts), -np.inf)
+    hi = np.full(len(model.consts), np.inf)
     for const in model.consts.values():
         if const.range is not None:
             lo[const.index_in_ctx] = const.range[0]
@@ -180,7 +198,7 @@ def _const_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _fit_constants(
-    model: Model,
+    model: InducedModel,
     vars_: list[Var],
     state_at_collocation: np.ndarray,  # (n_vars, n_col)
     deriv_at_collocation: np.ndarray,  # (n_vars, n_col)
@@ -188,7 +206,12 @@ def _fit_constants(
     device: torch.device,
     dtype: torch.dtype,
 ) -> Any:
-    rhs = _make_rhs(vars_)
+    # `vars_` here is the same state-only (differential) list `estimate_gradient_matching` built
+    # via `_split_endo_vars` - algebraic/frozen variables still need to be handed to `_make_rhs`
+    # so any state var's equation that reads one of them (e.g. growth reading a temperature-
+    # limitation factor) sees a correct, settled value instead of nothing.
+    _, algebraic_vars, frozen_values = _split_endo_vars(model)
+    rhs = _make_rhs(vars_, algebraic_vars, frozen_values)
 
     y_col = torch.as_tensor(state_at_collocation.T, dtype=dtype, device=device)  # (n_col, n_vars)
     target = torch.as_tensor(deriv_at_collocation.T, dtype=dtype, device=device)  # (n_col, n_vars)
@@ -210,7 +233,7 @@ def _fit_constants(
         c = torch.as_tensor(c_np, dtype=dtype, device=device)
         return jacfwd(residual_fn)(c).detach().cpu().numpy()
 
-    c0 = get_initial_const_ctx(model)
+    c0 = _initial_const_guess(model)
     lo, hi = _const_bounds(model)
     c0 = np.clip(c0, lo, hi)
 
@@ -224,7 +247,7 @@ def _fit_constants(
 
 @dataclass
 class GradientMatchingResult:
-    model: Model
+    model: InducedModel
     t_eval: np.ndarray
     consts: np.ndarray  # (n_consts,), ordered by const.index_in_ctx
     const_by_name: dict[str, float]
@@ -250,7 +273,7 @@ class GradientMatchingResult:
         the shooting-node seeds.
         """
         device = device or torch.device("cpu")
-        vars_ = self.model.get_endo_variables()
+        vars_, _, _ = _split_endo_vars(self.model)  # state vars only - see estimate_torch's init_params layout
 
         sub_indices = uniform_sub_indices(self.t_eval, n_subintervals)
         seed_times = self.t_eval[sub_indices[:-1]]
@@ -272,7 +295,7 @@ class GradientMatchingResult:
 
 
 def estimate_gradient_matching(
-    model: Model,
+    model: InducedModel,
     t_eval,
     collocation_times=None,
     max_gp_points: int = 300,
@@ -286,7 +309,7 @@ def estimate_gradient_matching(
 
     Parameters
     ----------
-    model : Model
+    model : InducedModel
         Must have `engine == "torch"` with every `Var.ode` written in
         differentiable torch ops (same precondition as `estimate_torch`).
         Exogenous variables' data must already be `TimeSeries.to_torch()`-ed.
@@ -303,14 +326,14 @@ def estimate_gradient_matching(
     """
     if model.engine != "torch":
         raise ValueError(
-            f"estimate_gradient_matching requires a Model built with engine='torch', got engine={model.engine!r}."
+            f"estimate_gradient_matching requires an InducedModel built with engine='torch', got engine={model.engine!r}."
         )
 
     device = device or torch.device("cpu")
     t_eval = np.asarray(t_eval, dtype=float)
     collocation_times = np.asarray(t_eval if collocation_times is None else collocation_times, dtype=float)
 
-    vars_ = model.get_endo_variables()
+    vars_, _, _ = _split_endo_vars(model)  # only differential ("state") vars have a trajectory to GP-fit
     gps: dict[str, _FittedGP] = {}
     for var in vars_:
         if var.data is None:

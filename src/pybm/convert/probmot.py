@@ -30,6 +30,9 @@ from typing import Any, Callable
 
 from lark import Lark, Token, Tree
 
+from pybm.expr import Expr, FuncExpr
+from pybm.expr import Num as ExprNum
+from pybm.func import _dispatched_binary, _dispatched_math
 from pybm.model import Const, Entity, Model, Process, ChooseProcess, Ode, Algebraic, Var
 
 _GRAMMAR_PATH = Path(__file__).parent / "probmot_grammar.lark"
@@ -79,60 +82,57 @@ class BinOp:
 
 
 _FUNCS: "dict[str, Callable]" = {
-    "exp": math.exp,
-    "pow": math.pow,
-    "sin": math.sin,
-    "cos": math.cos,
-    "sign": lambda x: (x > 0) - (x < 0),
-    "min": min,
-    "max": max,
-    "log": math.log,
-    "log10": math.log10,
+    # dispatched by the runtime type of the (possibly batched, torch/jax) value they're actually
+    # called with - see pybm.func._dispatched_math/_dispatched_binary - not plain `math.*`, which
+    # only accepts a single Python float and breaks the moment an equation is evaluated under the
+    # torch estimation pipeline (a batched tensor, not a scalar).
+    "exp": _dispatched_math("exp"),
+    "pow": _dispatched_binary("power", torch_name="pow"),
+    "sin": _dispatched_math("sin"),
+    "cos": _dispatched_math("cos"),
+    "sign": lambda x: (x > 0) - (x < 0),  # comparison + subtraction already dispatch generically
+    "min": _dispatched_binary("minimum"),
+    "max": _dispatched_binary("maximum"),
+    "log": _dispatched_math("log"),
+    "log10": _dispatched_math("log10"),
 }
 
 
-def compile_expr(node, resolve_dotted, resolve_name):
-    """Compiles an expression AST node into a `(t, ctx) -> float` closure.
+def compile_expr(node, resolve_dotted, resolve_name) -> Expr:
+    """Compiles a parsed expression AST node (the small dataclasses above - NOT to be confused
+    with `pybm.expr.Expr`, the *runtime* expression tree this function builds) into an `Expr`.
 
-    `resolve_dotted(ref, attr)` and `resolve_name(name)` return a `Var`/`Const` for the given
-    reference, already bound to whatever concrete entity/constant this expression is being built
-    against - see `_build_equations` for how those are supplied.
+    `resolve_dotted(ref, attr)` and `resolve_name(name)` return the concrete `Var`/`Const` for a
+    given reference - see `_build_equations` for how those are supplied. Both `Var` and `Const`
+    are themselves `Expr`s (see model.py/expr.py), so combining them with `+ - * /` below just
+    builds more `Expr` tree via plain Python operators - no closures needed.
     """
     if isinstance(node, Num):
-        v = node.value
-        return lambda t, ctx: v
+        return ExprNum(node.value)
     if isinstance(node, InfLit):
-        v = node.sign * math.inf
-        return lambda t, ctx: v
+        return ExprNum(node.sign * math.inf)
     if isinstance(node, NameRef):
-        target = resolve_name(node.name)
-        if isinstance(target, Const):
-            return lambda t, ctx: target(ctx)
-        return lambda t, ctx: target(t, ctx)
+        return resolve_name(node.name)
     if isinstance(node, Dotted):
-        target = resolve_dotted(node.ref, node.attr)
-        if isinstance(target, Const):
-            return lambda t, ctx: target(ctx)
-        return lambda t, ctx: target(t, ctx)
+        return resolve_dotted(node.ref, node.attr)
     if isinstance(node, Neg):
-        inner = compile_expr(node.operand, resolve_dotted, resolve_name)
-        return lambda t, ctx: -inner(t, ctx)
+        return -compile_expr(node.operand, resolve_dotted, resolve_name)
     if isinstance(node, BinOp):
         left = compile_expr(node.left, resolve_dotted, resolve_name)
         right = compile_expr(node.right, resolve_dotted, resolve_name)
         if node.op == "+":
-            return lambda t, ctx: left(t, ctx) + right(t, ctx)
+            return left + right
         if node.op == "-":
-            return lambda t, ctx: left(t, ctx) - right(t, ctx)
+            return left - right
         if node.op == "*":
-            return lambda t, ctx: left(t, ctx) * right(t, ctx)
+            return left * right
         if node.op == "/":
-            return lambda t, ctx: left(t, ctx) / right(t, ctx)
+            return left / right
         raise ValueError(f"Unknown operator {node.op}")
     if isinstance(node, FuncCall):
         func = _FUNCS[node.name]
-        arg_fns = [compile_expr(a, resolve_dotted, resolve_name) for a in node.args]
-        return lambda t, ctx: func(*(f(t, ctx) for f in arg_fns))
+        args = [compile_expr(a, resolve_dotted, resolve_name) for a in node.args]
+        return FuncExpr(func, args, name=node.name)
     raise TypeError(f"Unknown expression node {node!r}")
 
 
@@ -626,7 +626,7 @@ class Library:
 _ROLE_MAP = {"endogenous": "endo", "exogenous": "exo"}
 
 
-def _build_entity(library: Library, spec: EntityInstanceSpec, model: Model) -> Entity:
+def _build_entity(library: Library, spec: EntityInstanceSpec) -> Entity:
     var_specs, const_specs = library.entity_vars_consts(spec.template)
     parts: "list[Var | Const]" = []
     for vs in var_specs:
@@ -642,7 +642,7 @@ def _build_entity(library: Library, spec: EntityInstanceSpec, model: Model) -> E
             cs.name, initial_value=inst_attrs.get("value"),
             range=cs.attrs.get("range"), unit=cs.attrs.get("unit"),
         ))
-    return Entity(*parts, name=spec.name, active_model=model)
+    return Entity(*parts, name=spec.name)
 
 
 RoleBindings = "dict[str, str | list[str]]"  # role name -> entity name, or list of entity names
@@ -651,12 +651,16 @@ RoleBindings = "dict[str, str | list[str]]"  # role name -> entity name, or list
 class ModelBuilder:
     """Builds a `pybm.model.Model` from a parsed `.pbm` file against a `Library`.
 
-    Role bindings are threaded through as entity NAME strings (not `Entity` objects) everywhere
-    except at the final point of use (`_lookup`) - this is what lets the exact same code path build
-    either a directly-added `Process` (resolved against `self.entities`) or a `ChooseProcess`
-    candidate factory (resolved fresh against whichever model `Model.induce()` is currently
-    resolving), without risking the stale-object-reference bug `ChooseProcess` is documented against
-    in model.py.
+    Role bindings are threaded through as entity NAME strings (not `Entity` objects), resolved to
+    the actual `Entity`/`Var`/`Const` only at the point of use (`_lookup`) - this mirrors
+    ProBMoT's own role syntax (roles are always referenced by name) and keeps role-binding dicts
+    small and printable for debugging.
+
+    `ChooseProcess` candidates are plain, already-built `Process` objects, built directly against
+    `self.entities` - there is exactly one `entities` dict for the whole file, built once up
+    front. `Model.induce()` (see model.py) takes care of giving each resolved combination its own
+    independent copy internally (one `copy.deepcopy` per combination), so the converter never
+    needs to defer building a candidate until resolution time the way an earlier design did.
     """
 
     def __init__(self, library: Library, pbm: ParsedFile):
@@ -671,7 +675,9 @@ class ModelBuilder:
 
     def build(self) -> Model:
         for espec in self.pbm.entity_instances:
-            self.entities[espec.name] = _build_entity(self.library, espec, self.model)
+            entity = _build_entity(self.library, espec)
+            self.entities[espec.name] = entity
+            self.model.add(entity)
 
         referenced_as_nested = {name for p in self.pbm.process_instances for name in p.sub_processes}
         for pspec in self.pbm.process_instances:
@@ -690,28 +696,27 @@ class ModelBuilder:
             bindings[param.name] = names if param.cardinality is not None else names[0]
         return bindings
 
-    def _lookup(self, ref: str, attr: str, role_bindings: RoleBindings, entities: "dict[str, Entity]"):
+    def _lookup(self, ref: str, attr: str, role_bindings: RoleBindings) -> "Var | Const":
         target_name = role_bindings[ref]
         if isinstance(target_name, list):
             raise ValueError(f"'{ref}.{attr}' refers to a set-valued role outside of an iterator")
-        return entities[target_name][attr]
+        return self.entities[target_name][attr]
 
     def _anon_name(self, template_name: str) -> str:
         self._anon_counter += 1
         return f"{template_name}_{self._anon_counter}"
 
-    # ---- equations / sub-process slots (name-based, entity-lookup deferred) ----
+    # ---- equations / sub-process slots ----
 
-    def _build_equations(self, template_name: str, role_bindings: RoleBindings, consts: "dict[str, Const]",
-                          entities: "dict[str, Entity]"):
+    def _build_equations(self, template_name: str, role_bindings: RoleBindings, consts: "dict[str, Const]"):
         out = []
         for eq in self.library.process_equations(template_name):
-            resolve_dotted = lambda ref, attr, rb=role_bindings: self._lookup(ref, attr, rb, entities)
+            resolve_dotted = lambda ref, attr, rb=role_bindings: self._lookup(ref, attr, rb)
             resolve_name = lambda name, c=consts: c[name]
             if eq.target_iter is None:
-                var = self._lookup(eq.target_ref, eq.target_attr, role_bindings, entities)
-                func = compile_expr(eq.expr, resolve_dotted, resolve_name)
-                out.append((Ode if eq.is_diff else Algebraic)(var, func))
+                var = self._lookup(eq.target_ref, eq.target_attr, role_bindings)
+                expr = compile_expr(eq.expr, resolve_dotted, resolve_name)
+                out.append((Ode if eq.is_diff else Algebraic)(var, expr))
             else:
                 iter_var, roleset = eq.target_iter
                 for entity_name in role_bindings[roleset]:
@@ -723,12 +728,12 @@ class ModelBuilder:
                     # ProBMoT does. target_ref is None => the LHS itself was `<n:ns>.attr`, so each
                     # expansion targets a DIFFERENT var (one per entity).
                     if eq.target_ref is not None:
-                        var = self._lookup(eq.target_ref, eq.target_attr, role_bindings, entities)
+                        var = self._lookup(eq.target_ref, eq.target_attr, role_bindings)
                     else:
-                        var = entities[entity_name][eq.target_attr]
-                    rd = lambda ref, attr, rb=rb: self._lookup(ref, attr, rb, entities)
-                    func = compile_expr(eq.expr, rd, resolve_name)
-                    out.append((Ode if eq.is_diff else Algebraic)(var, func))
+                        var = self.entities[entity_name][eq.target_attr]
+                    rd = lambda ref, attr, rb=rb: self._lookup(ref, attr, rb)
+                    expr = compile_expr(eq.expr, rd, resolve_name)
+                    out.append((Ode if eq.is_diff else Algebraic)(var, expr))
         return out
 
     def _collect_slots(self, template_name: str, role_bindings: RoleBindings):
@@ -753,8 +758,7 @@ class ModelBuilder:
     # ---- building a concrete (leaf) process ----
 
     def _build_concrete(self, template_name: str, role_bindings: RoleBindings, consts_override: dict,
-                         sub_process_overrides: "list[str] | None", proc_name: str,
-                         entities: "dict[str, Entity]") -> Process:
+                         sub_process_overrides: "list[str] | None", proc_name: str) -> Process:
         const_specs = self.library.process_consts(template_name)
         consts = {
             cs.name: Const(
@@ -763,7 +767,7 @@ class ModelBuilder:
             )
             for cs in const_specs
         }
-        equations = self._build_equations(template_name, role_bindings, consts, entities)
+        equations = self._build_equations(template_name, role_bindings, consts)
 
         slots = self._collect_slots(template_name, role_bindings)
         nested: "list[Process]" = []
@@ -773,12 +777,12 @@ class ModelBuilder:
                 f"but the .pbm instance lists {len(sub_process_overrides)}: {sub_process_overrides}"
             )
             for (slot_template, slot_roles), given_name in zip(slots, sub_process_overrides):
-                resolved = self._resolve_sub_process_slot(given_name, slot_template, slot_roles, entities)
+                resolved = self._resolve_sub_process_slot(given_name, slot_template, slot_roles)
                 if resolved is not None:
                     nested.append(resolved)
         else:
             for slot_template, slot_roles in slots:
-                resolved = self._build_bare_template_ref(slot_template, slot_roles, entities)
+                resolved = self._build_bare_template_ref(slot_template, slot_roles)
                 if isinstance(resolved, ChooseProcess):
                     self.model.add(resolved)
                 else:
@@ -786,42 +790,30 @@ class ModelBuilder:
 
         return Process(*equations, *nested, *consts.values(), name=proc_name)
 
-    def _build_bare_template_ref(self, template_name: str, role_bindings: RoleBindings,
-                                  entities: "dict[str, Entity]") -> "Process | ChooseProcess":
+    def _build_bare_template_ref(self, template_name: str, role_bindings: RoleBindings) -> "Process | ChooseProcess":
         """An anonymous nested reference with no .pbm-given name/override list at all - if it's
-        structurally ambiguous, produce a ChooseProcess candidate right here (using `entities`, not
-        `self.entities`, so it resolves correctly if this is itself inside another ChooseProcess
-        candidate's factory)."""
+        structurally ambiguous, produce a ChooseProcess with one already-built Process candidate
+        per leaf descendant."""
         name = self._anon_name(template_name)
         if self.library.is_leaf(template_name):
-            return self._build_concrete(template_name, role_bindings, {}, None, name, entities)
+            return self._build_concrete(template_name, role_bindings, {}, None, name)
         leaves = self.library.leaf_descendants(template_name)
         if len(leaves) == 1:
-            return self._build_concrete(leaves[0], role_bindings, {}, None, name, entities)
+            return self._build_concrete(leaves[0], role_bindings, {}, None, name)
         return ChooseProcess(
-            *(self._make_factory(leaf, role_bindings, {}, None) for leaf in leaves), name=name
+            *(self._build_concrete(leaf, role_bindings, {}, None, self._anon_name(leaf)) for leaf in leaves),
+            name=name,
         )
 
-    def _resolve_sub_process_slot(self, given_name: str, slot_template: str, slot_roles: RoleBindings,
-                                   entities: "dict[str, Entity]") -> "Process | None":
+    def _resolve_sub_process_slot(self, given_name: str, slot_template: str, slot_roles: RoleBindings) -> "Process | None":
         if given_name in self.named_processes:
             result = self._resolve_named_instance(given_name)
         else:
-            result = self._build_bare_template_ref(given_name, slot_roles, entities)
+            result = self._build_bare_template_ref(given_name, slot_roles)
         if isinstance(result, ChooseProcess):
             self.model.add(result)  # flatten: register at the model level instead of nesting
             return None
         return result
-
-    def _make_factory(self, leaf_template: str, role_bindings: RoleBindings, consts_override: dict,
-                       sub_process_overrides: "list[str] | None") -> "Callable[[Model], Process]":
-        def factory(model: Model) -> Process:
-            return self._build_concrete(
-                leaf_template, role_bindings, consts_override, sub_process_overrides,
-                self._anon_name(leaf_template), model.entities,
-            )
-
-        return factory
 
     # ---- named, top-level (or explicitly-declared nested) .pbm process instances ----
 
@@ -834,17 +826,22 @@ class ModelBuilder:
 
         if self.library.is_leaf(pspec.template):
             result = self._build_concrete(
-                pspec.template, role_bindings, pspec.consts, pspec.sub_processes, pspec.name, self.entities
+                pspec.template, role_bindings, pspec.consts, pspec.sub_processes, pspec.name
             )
         else:
             leaves = self.library.leaf_descendants(pspec.template)
             if len(leaves) == 1:
                 result = self._build_concrete(
-                    leaves[0], role_bindings, pspec.consts, pspec.sub_processes, pspec.name, self.entities
+                    leaves[0], role_bindings, pspec.consts, pspec.sub_processes, pspec.name
                 )
             else:
                 result = ChooseProcess(
-                    *(self._make_factory(leaf, role_bindings, pspec.consts, pspec.sub_processes) for leaf in leaves),
+                    *(
+                        self._build_concrete(
+                            leaf, role_bindings, pspec.consts, pspec.sub_processes, self._anon_name(leaf)
+                        )
+                        for leaf in leaves
+                    ),
                     name=pspec.name,
                 )
         self._built[name] = result

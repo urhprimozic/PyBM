@@ -3,8 +3,8 @@
 No pytest dependency - matches the rest of the project, which has none either.
 """
 
-from pybm.model import Model, Process, Ode
-from pybm.templates import EntityTemp, VarTemp, ConstTemp, ProcessTemplate
+from pybm.model_old import Model, Process, Ode
+from pybm.templates_old import EntityTemp, VarTemp, ConstTemp, ProcessTemplate
 
 # --- Entity template, à la ProBMoT's "Population" ---
 PopulationTemp = EntityTemp(
