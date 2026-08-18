@@ -22,6 +22,7 @@ usable directly inside an `Ode`/`Algebraic`.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -49,38 +50,42 @@ def infer_engine(value: Any) -> Literal["scipy", "torch", "jax"]:
     return "scipy"
 
 
+def _apply_dispatched_math(name: str, x: Any) -> Any:
+    """The actual `torch.<name>` / `jax.numpy.<name>` / `numpy.<name>` dispatch behind
+    `_dispatched_math` - a plain module-level function (not a closure) so `functools.partial`
+    over it stays picklable, which matters once an equation built with it needs to cross a
+    process boundary (e.g. `estimate_model(..., parallel=True)`, see multishooting_torch.py) -
+    a closure isn't picklable by the stdlib `pickle` module `multiprocessing` uses by default."""
+    engine = infer_engine(x)
+    if engine == "jax":
+        import jax.numpy as jnp
+        return getattr(jnp, name)(x)
+    if engine == "torch":
+        return getattr(torch, name)(x)
+    return getattr(np, name)(x)
+
+
 def _dispatched_math(name: str) -> Callable[[Any], Any]:
     """Returns a scalar math function that picks `torch.<name>` / `jax.numpy.<name>` /
     `numpy.<name>` via `infer_engine`, so the same Expr works unmodified on any engine."""
+    return functools.partial(_apply_dispatched_math, name)
 
-    def dispatched(x):
-        engine = infer_engine(x)
-        if engine == "jax":
-            import jax.numpy as jnp
-            return getattr(jnp, name)(x)
-        if engine == "torch":
-            return getattr(torch, name)(x)
-        return getattr(np, name)(x)
 
-    dispatched.__name__ = name
-    return dispatched
+def _apply_dispatched_binary(name: str, torch_name: str, a: Any, b: Any) -> Any:
+    """Same idea as `_apply_dispatched_math`, for `_dispatched_binary`."""
+    engine = infer_engine(a)
+    if engine == "jax":
+        import jax.numpy as jnp
+        return getattr(jnp, name)(a, b)
+    if engine == "torch":
+        return getattr(torch, torch_name)(a, b)
+    return getattr(np, name)(a, b)
 
 
 def _dispatched_binary(name: str, torch_name: "str | None" = None) -> Callable[[Any, Any], Any]:
     """Two-argument analogue of `_dispatched_math` (e.g. for `pow`/`min`/`max`). `torch_name`
     covers the rare case where torch's name differs from numpy/jax's (e.g. `pow` vs `power`)."""
-    torch_name = torch_name or name
-
-    def dispatched(a, b):
-        engine = infer_engine(a)
-        if engine == "jax":
-            import jax.numpy as jnp
-            return getattr(jnp, name)(a, b)
-        if engine == "torch":
-            return getattr(torch, torch_name)(a, b)
-        return getattr(np, name)(a, b)
-
-    return dispatched
+    return functools.partial(_apply_dispatched_binary, name, torch_name or name)
 
 
 def _make_unary_math(name: str) -> "Callable[[Expr | float], FuncExpr]":

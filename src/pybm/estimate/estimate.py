@@ -1,3 +1,4 @@
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import torch
@@ -6,7 +7,7 @@ from typing import Any, Callable, Literal
 import numpy as np
 from scipy.optimize import least_squares
 
-from pybm.estimate.gradient_matching import estimate_gradient_matching
+from pybm.estimate.gradient_matching import estimate_gradient_matching, fit_gps
 from pybm.estimate.multishooting_torch import (
     _build_subinterval_grid,
     _make_solver,
@@ -46,6 +47,7 @@ def _singleshooting_loss(
     method: Literal["scipy", "torch"] = "scipy",
     max_iter: int = 200,
     lr: float = 0.05,
+    device: "torch.device | str | None" = None,
 ) -> float:
     """
     Returns the minimal loss (MSE) of a single, whole-horizon trajectory simulated with the given
@@ -61,12 +63,15 @@ def _singleshooting_loss(
 
     `method` picks the optimization backend:
     - "scipy": `scipy.optimize.least_squares` around `pybm.simulate.trajectory.simulate`
-      (numeric Jacobian, works with any model - no differentiability requirement).
+      (numeric Jacobian, works with any model - no differentiability requirement). `device` is
+      ignored - this path is plain numpy, always CPU.
     - "torch": gradient descent (Adam) with exact gradients through a torchode integration -
       requires `model.engine == "torch"` and every equation written in differentiable torch ops
       (same precondition as `pybm.estimate.multishooting_torch.estimate_torch`), but is typically
       much faster since it doesn't need to re-simulate the whole trajectory per finite-difference
-      probe.
+      probe. `device` (default CPU) is where the solve runs - `model` itself should already be on
+      the same device (see `InducedModel.switch_engine`'s `device` argument), or an exogenous
+      variable's data and this call's own tensors will collide the moment an equation reads both.
 
     Returns a plain `float` either way.
     """
@@ -98,7 +103,7 @@ def _singleshooting_loss(
         )
     elif method == "torch":
         return _singleshooting_loss_torch(
-            model, t_eval, const_ctx, state_vars, data, x0, max_iter=max_iter, lr=lr
+            model, t_eval, const_ctx, state_vars, data, x0, max_iter=max_iter, lr=lr, device=device
         )
     else:
         raise ValueError(f"Unknown method {method!r}. Use 'scipy' or 'torch'.")
@@ -142,13 +147,14 @@ def _singleshooting_loss_torch(
     x0: np.ndarray,
     max_iter: int,
     lr: float,
+    device: "torch.device | str | None" = None,
 ) -> float:
     if model.engine != "torch":
         raise ValueError(
             f"_singleshooting_loss(method='torch') requires an InducedModel built with "
             f"engine='torch', got engine={model.engine!r}."
         )
-    device = torch.device("cpu")
+    device = torch.device(device) if device is not None else torch.device("cpu")
     dtype = torch.float64
 
     _, algebraic_vars, frozen_values = _split_endo_vars(model)
@@ -195,13 +201,99 @@ class FullEstimationResults:
     best_loss : float | np.ndarray | torch.Tensor | Any
     all_results : list[ParamEstimationResults]
 
+
+def _worker_init():
+    """
+    Runs once per worker process, before it picks up any job. Without this, each of the N worker
+    PROCESSES would also let torch spin up its own multi-threaded BLAS pool - N processes x M
+    threads each easily oversubscribes the machine's actual core count, which shows up as
+    everything getting slower once you add workers, not faster. Since the parallelism here is
+    already across processes (one model per worker), each worker only needs 1 torch thread.
+    """
+    torch.set_num_threads(1)
+
+
+def _estimate_one(
+    index: int,
+    model: InducedModel,
+    t_eval,
+    estimator: Callable,
+    engine: Literal["torch", "scipy"],
+    max_iter_loss: int,
+    verbose: int,
+    args: tuple,
+    kwargs: dict,
+    device: "torch.device | str | None" = None,
+    gps: "dict | None" = None,
+    ftol: float = 1e-4,
+    xtol: float = 1e-4,
+    gtol: float = 1e-4,
+    max_nfev: "int | None" = 1000,
+) -> ParamEstimationResults:
+    """
+    Estimates a single (already induced) model's constants and scores it - the per-model unit of
+    work `estimate_model` maps over `models`, sequentially or (via `parallel=True`) across
+    processes. Module-level (not a closure) specifically so it - and the `InducedModel` it's
+    called with - can be pickled and sent to a worker process; see `pybm.func`'s
+    `_apply_dispatched_math`/`_apply_dispatched_binary` for the matching fix on the model side
+    (an `InducedModel` built from a converted ProBMoT library embeds `exp`/`pow`/... callables in
+    its equations, which also need to survive that same pickling).
+
+    `device` (torch-only, ignored for `engine="scipy"`) is applied to `model` itself first (see
+    `InducedModel.switch_engine`), then threaded into both the estimator call and the loss
+    computation, so every tensor this model ever touches lives on the same device throughout -
+    otherwise an exogenous variable's data left on one device and a state/const tensor on another
+    collide the moment an equation reads both.
+
+    `gps` (recipe "gp" only) is forwarded straight to `estimate_gradient_matching` - see
+    `estimate_model`'s docstring for why this is fit once, up front, shared across every model
+    instead of being redone here per structural candidate.
+
+    `ftol`/`xtol`/`gtol`/`max_nfev` (recipe "gp" only) are forwarded to `estimate_gradient_matching`
+    -> `scipy.optimize.least_squares`, the constant fit's own convergence knobs.
+    """
+    try:
+        if verbose >= 2:
+            print(f"Estimating model #{index}")
+        if engine == "torch":
+            model.switch_engine(engine, device=device)
+        else:
+            model.switch_engine(engine)
+        results: ParamEstimationResults = estimator(
+            model, t_eval, *args, device=device, gps=gps,
+            ftol=ftol, xtol=xtol, gtol=gtol, max_nfev=max_nfev, **kwargs,
+        )
+        if verbose >= 2:
+            print("Calculating model loss..")
+        results.loss = _singleshooting_loss(
+            model, t_eval, results.consts, method=engine, max_iter=max_iter_loss, device=device
+        )
+    except Exception as e:
+        print(f"Error occurred while estimating model #{index}: {e}.")
+        # store a result with infinite loss to indicate failure, instead of dropping it - keeps
+        # all_results aligned 1:1 with `models` and never empty just because every candidate
+        # happened to fail.
+        results = ParamEstimationResults(model=model, consts=np.nan, loss=np.inf, const_by_name={})
+    return results
+
+
 def estimate_model(
     incomplete_model,
     t_eval: np.ndarray | torch.Tensor | Any,
     recepie: recepies = "gp",
     parallel=False,
+    max_workers: "int | None" = None,
     n_intervals_ms=50,
     engine: Literal["torch", "scipy"] = "torch",
+    device: "torch.device | str | None" = None,
+    max_iter_loss : int = 100,
+    verbose : int = 0,
+    max_gp_iter: int = 100,
+    max_gp_points: int = 300,
+    ftol: float = 1e-4,
+    xtol: float = 1e-4,
+    gtol: float = 1e-4,
+    max_nfev: "int | None" = 1000,
     *args,
     **kwargs,
 ):
@@ -220,9 +312,36 @@ def estimate_model(
 
         Default is "gp".
     parallel : bool, optional
-        If true, different models will be estimated in parallel. Default is false
+        If true, different structural candidates are estimated in separate worker PROCESSES
+        (`concurrent.futures.ProcessPoolExecutor`), not threads - this is CPU-bound work (GP
+        fitting, least_squares, torch forward/backward passes), and threads would still fight over
+        the GIL for the pure-Python parts. Requires everything reachable from an `InducedModel`
+        (its `Var`/`Const`/`Expr` tree, any exogenous `TimeSeries` data) to be picklable to cross
+        the process boundary - true for equations built via `pybm.func`'s `exp`/`sin`/.../`If`, or
+        converted from a ProBMoT library (see `_estimate_one`'s docstring) - but a hand-written
+        equation using a local lambda/closure as its callable would break this.
+        Default is false.
+    max_workers : int, optional
+        Worker process count for `parallel=True` (default: `os.cpu_count()`, via
+        `ProcessPoolExecutor`'s own default). Ignored if `parallel` is false.
     n_intervals_ms : int, optional
         The number of intervals for multishooting. Default is 50.
+    device : torch.device | str, optional
+        Where to run everything torch-based (`engine="torch"`) - pass e.g. `"cuda"` to use a GPU,
+        or explicitly pass `"cpu"` to force CPU even if a GPU is available (default is already CPU
+        when omitted - `None` never means "auto-pick a GPU"). Applied consistently to every
+        induced model (`InducedModel.switch_engine`), the estimator, and the loss computation, so
+        an exogenous variable's data and the state/const tensors it's read alongside never end up
+        on different devices. Ignored when `engine="scipy"` (that path is plain numpy, always CPU)
+        - with `parallel=True` and multiple GPU workers you don't want oversubscribing a single
+        device, pick one device per run (or drive that split yourself, outside this function).
+    max_gp_iter, max_gp_points : int, optional
+        Passed to `fit_gps` (recipe "gp" only) - see `pybm.estimate.gradient_matching.fit_gps`.
+    ftol, xtol, gtol, max_nfev : optional
+        Recipe "gp" only - forwarded to `scipy.optimize.least_squares` for the constant fit (see
+        `pybm.estimate.gradient_matching.estimate_gradient_matching`). Loosen these to trade fit
+        accuracy for speed - this recipe is only a fast initializer to begin with (see that
+        module's docstring), so an approximate answer is often good enough.
     *args :
         Additional positional arguments to be passed to the estimator function.
     **kwargs :
@@ -242,25 +361,47 @@ def estimate_model(
     # induce models
     models = incomplete_model.induce()
 
-    if parallel:
-        raise NotImplementedError("Not yet implemented")
+    # Step 1 of gradient matching (the GP fit) depends only on a variable's own observed data,
+    # never on which structural candidate is chosen elsewhere in the model - fit it ONCE here,
+    # against the ORIGINAL incomplete_model's vars (data is attached before induce() and
+    # deep-copied identically into every branch, so this is exactly the same fit every branch
+    # would otherwise redo from scratch). Matched by variable name in estimate_gradient_matching,
+    # so it doesn't matter whether a given variable ends up state/algebraic/frozen in any specific
+    # branch - an unused entry here is simply never looked up.
+    gps = None
+    if recepie == "gp":
+        vars_with_data = [var for var in incomplete_model.vars.values() if var.data is not None]
+        if vars_with_data:
+            gps = fit_gps(vars_with_data, max_gp_points=max_gp_points, max_gp_iter=max_gp_iter, verbose=verbose)
 
-    # estimate parameters for each model
-    all_results = []
-    for model in tqdm(models, total=len(models), desc="Structure estimation"):
-        try:
-            model.switch_engine(engine)
-            results: ParamEstimationResults = estimator(model, t_eval, *args, **kwargs)
-            results.loss = _singleshooting_loss(model, t_eval, results.consts, method=engine)
-        except Exception as e:
-            print(f"Error occurred while estimating model: {e}.")
-            # store a result with infinite loss to indicate failure, instead of dropping it -
-            # keeps all_results aligned 1:1 with `models` and never empty just because every
-            # candidate happened to fail.
-            results = ParamEstimationResults(
-                model=model, consts=np.nan, loss=np.inf, const_by_name={}
+    if parallel:
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init) as executor:
+            future_to_index = {
+                executor.submit(
+                    _estimate_one, index, model, t_eval, estimator, engine, max_iter_loss, verbose, args, kwargs,
+                    device, gps, ftol, xtol, gtol, max_nfev,
+                ): index
+                for index, model in enumerate(models)
+            }
+            indexed_results: "list[tuple[int, ParamEstimationResults]]" = []
+            for future in tqdm(
+                as_completed(future_to_index), total=len(future_to_index),
+                desc="Structure estimation (parallel)", disable=verbose == 0,
+            ):
+                indexed_results.append((future_to_index[future], future.result()))
+        # as_completed() finishes in COMPLETION order, not submission order - restore the
+        # original models[] order so all_results stays aligned with it either way.
+        all_results = [result for _, result in sorted(indexed_results, key=lambda pair: pair[0])]
+    else:
+        all_results = [
+            _estimate_one(
+                index, model, t_eval, estimator, engine, max_iter_loss, verbose, args, kwargs,
+                device, gps, ftol, xtol, gtol, max_nfev,
             )
-        all_results.append(results)
+            for index, model in tqdm(
+                enumerate(models), total=len(models), desc="Structure estimation", disable=verbose == 0
+            )
+        ]
 
     # find the best model
     best_result = min(all_results, key=lambda r: r.loss)

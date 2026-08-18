@@ -206,6 +206,10 @@ def _fit_constants(
     collocation_times: np.ndarray,
     device: torch.device,
     dtype: torch.dtype,
+    ftol: float = 1e-4,
+    xtol: float = 1e-4,
+    gtol: float = 1e-4,
+    max_nfev: "int | None" = 1000,
 ) -> Any:
     # `vars_` here is the same state-only (differential) list `estimate_gradient_matching` built
     # via `_split_endo_vars` - algebraic/frozen variables still need to be handed to `_make_rhs`
@@ -238,7 +242,9 @@ def _fit_constants(
     lo, hi = _const_bounds(model)
     c0 = np.clip(c0, lo, hi)
 
-    return least_squares(fun, x0=c0, jac=jac, bounds=(lo, hi), method="trf")
+    return least_squares(
+        fun, x0=c0, jac=jac, bounds=(lo, hi), method="trf", ftol=ftol, xtol=xtol, gtol=gtol, max_nfev=max_nfev
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -294,15 +300,47 @@ class GradientMatchingResult(ParamEstimationResults):
 
         return params
 
+def fit_gps(
+    vars_: "list[Var]", max_gp_points: int = 300, max_gp_iter: int = 200, verbose: int = 0
+) -> "dict[str, _FittedGP]":
+    """
+    Fits one GP per variable in `vars_`, keyed by name - step 1 of gradient matching, split out on
+    its own because it depends ONLY on a variable's own observed data (`var.data`), never on a
+    model's equations/structure. That makes it safe (and, across a structural search over many
+    induced models sharing the same underlying data, a large amount of redundant work to skip) to
+    fit ONCE up front and reuse across every candidate model - see `estimate_gradient_matching`'s
+    `gps` argument and `pybm.estimate.estimate.estimate_model`, which does exactly that.
+    """
+    gps: dict[str, _FittedGP] = {}
+    for var in vars_:
+        if var.data is None:
+            raise ValueError(f"Variable {var.name} has no data; gradient matching needs an observed trajectory.")
+        t_obs, y_obs = _series_as_numpy(var.data.t, var.data.x)
+        gps[var.name] = _fit_gp_1d(t_obs, y_obs, max_points=max_gp_points, max_iter=max_gp_iter)
+        if verbose>= 2:
+            gp = gps[var.name]
+            print(
+                f"[gradient_matching] {var.name}: lengthscale={gp.lengthscale:.4g} "
+                f"signal_std={gp.signal_var**0.5:.4g} noise_std={gp.noise_var**0.5:.4g} "
+                f"log_marginal_likelihood={gp.log_marginal_likelihood:.4g}"
+            )
+    return gps
+
+
 def estimate_gradient_matching(
     model: InducedModel,
     t_eval,
     collocation_times=None,
     max_gp_points: int = 300,
     max_gp_iter: int = 200,
+    gps: "dict[str, _FittedGP] | None" = None,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float64,
     verbose: int = 0,
+    ftol: float = 1e-4,
+    xtol: float = 1e-4,
+    gtol: float = 1e-4,
+    max_nfev: "int | None" = 1000,
 ) -> GradientMatchingResult:
     """
     Two-step gradient-matching initial guess for a model's constants.
@@ -322,7 +360,29 @@ def estimate_gradient_matching(
     max_gp_points : int
         GP hyperparameter fitting is O(n^3); observed series longer than
         this are subsampled evenly before fitting (posterior queries
-        afterwards stay cheap and use the full collocation grid).
+        afterwards stay cheap and use the full collocation grid). Ignored for any variable already
+        covered by `gps`.
+    gps : dict[str, _FittedGP], optional
+        Precomputed GPs (see `fit_gps`), keyed by variable name - step 1 (the GP fit) is skipped
+        for any state variable already present here, and only fit fresh for the rest. Pass this
+        when calling `estimate_gradient_matching` many times over structurally different models
+        that share the same underlying observed data (e.g. a structural search over many induced
+        models from the same `incomplete_model`) - step 1 doesn't depend on the model's equations
+        at all, only on each variable's own data, so redoing it per model is pure waste.
+    device : torch.device, optional
+        Where step 3's constant fit runs (`torch.device("cuda")` to use a GPU) - `model` is
+        switched onto this same device before anything else, so exogenous variables' data ends up
+        there too (see `InducedModel.switch_engine`); without that, a state/const tensor on
+        `device` and an exogenous variable's data left on CPU would collide the moment an equation
+        reads both (e.g. `env.temperature / refTemp`). Step 1 (the GP fit itself, plain numpy/
+        scipy - `_fit_gp_1d`) always runs on CPU regardless of `device` - it's a small (at most
+        `max_gp_points` x `max_gp_points`) Cholesky factorization per variable, not worth a GPU
+        round-trip, and rewriting it in torch is its own separate undertaking.
+    ftol, xtol, gtol, max_nfev : optional
+        Passed straight through to `scipy.optimize.least_squares` (step 3, the constant fit) -
+        loosen these (larger tol, smaller `max_nfev`) to stop earlier at a rougher answer, which
+        is often fine here since this whole function is only a fast initializer for a proper
+        estimator anyway (see the module docstring).
     """
     if model.engine != "torch":
         raise ValueError(
@@ -330,29 +390,22 @@ def estimate_gradient_matching(
         )
 
     device = device or torch.device("cpu")
+    model.switch_engine("torch", device=device)  # exogenous data must live on `device` too
     t_eval = np.asarray(t_eval, dtype=float)
     collocation_times = np.asarray(t_eval if collocation_times is None else collocation_times, dtype=float)
 
     vars_, _, _ = _split_endo_vars(model)  # only differential ("state") vars have a trajectory to GP-fit
-    gps: dict[str, _FittedGP] = {}
-    for var in vars_:
-        if var.data is None:
-            raise ValueError(f"Variable {var.name} has no data; gradient matching needs an observed trajectory.")
-        t_obs, y_obs = _series_as_numpy(var.data.t, var.data.x)
-        gps[var.name] = _fit_gp_1d(t_obs, y_obs, max_points=max_gp_points, max_iter=max_gp_iter)
-        if verbose:
-            gp = gps[var.name]
-            print(
-                f"[gradient_matching] {var.name}: lengthscale={gp.lengthscale:.4g} "
-                f"signal_std={gp.signal_var**0.5:.4g} noise_std={gp.noise_var**0.5:.4g} "
-                f"log_marginal_likelihood={gp.log_marginal_likelihood:.4g}"
-            )
+    gps = dict(gps) if gps is not None else {}
+    missing = [var for var in vars_ if var.name not in gps]
+    if missing:
+        gps.update(fit_gps(missing, max_gp_points=max_gp_points, max_gp_iter=max_gp_iter, verbose=verbose))
 
     state_at_collocation = np.stack([gps[var.name].mean(collocation_times) for var in vars_])
     deriv_at_collocation = np.stack([gps[var.name].mean_deriv(collocation_times) for var in vars_])
 
     result = _fit_constants(
-        model, vars_, state_at_collocation, deriv_at_collocation, collocation_times, device, dtype
+        model, vars_, state_at_collocation, deriv_at_collocation, collocation_times, device, dtype,
+        ftol=ftol, xtol=xtol, gtol=gtol, max_nfev=max_nfev,
     )
     if verbose:
         print(f"[gradient_matching] constant fit: cost={result.cost:.4g} success={result.success}")

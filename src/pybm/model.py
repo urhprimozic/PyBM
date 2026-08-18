@@ -69,10 +69,20 @@ class TimeSeries:
         self.x = x
         self.index = 0
 
-    def to_torch(self):
-        """Converts the time series to torch tensors."""
-        self.t = torch.tensor(self.t)
-        self.x = torch.tensor(self.x)
+    def to_torch(self, device: "torch.device | str | None" = None):
+        """Converts the time series to torch tensors, placed on `device` (default: whatever
+        `torch.tensor` itself defaults to - CPU). Pass the same `device` you'll evaluate equations
+        on (e.g. `torch.device("cuda")`) - otherwise a state/const tensor there and this
+        exogenous variable's data end up on different devices, and reading both in the same
+        equation (e.g. `env.temperature / refTemp`) raises at the first mixed operation.
+
+        Safe to call more than once (e.g. `switch_engine("torch", ...)` re-running on an already-
+        torch model, to move it to a different device) - `self.t`/`self.x` may already be tensors,
+        in which case this reuses them (`.detach().clone()`, since a plain `torch.tensor(tensor)`
+        call both warns and is the slower path) instead of re-wrapping from scratch.
+        """
+        self.t = self.t.detach().clone().to(device=device) if torch.is_tensor(self.t) else torch.tensor(self.t, device=device)
+        self.x = self.x.detach().clone().to(device=device) if torch.is_tensor(self.x) else torch.tensor(self.x, device=device)
 
     def to_jax(self):
         """Converts the time series to jax arrays."""
@@ -481,6 +491,36 @@ class Model:
         else:
             raise ValueError(f"Argument {arg} is not a valid model component.")
 
+    @property
+    def vars(self) -> "dict[str, Var]":
+        """
+        Every Var reachable from this (still incomplete) model, under the same dotted names
+        `InducedModel.vars` uses (`entity_name.var_name`, or the bare name for a free-standing
+        Var). Handy for attaching data before `induce()` - e.g. `model.vars["phyto.conc"].
+        set_data(t, x)` - so every resolved branch inherits it via the same `copy.deepcopy()` that
+        already gives each one its own independent Var objects, instead of having to attach it
+        separately to each `InducedModel` afterwards. Recomputed on every access (cheap - just a
+        dict walk), so it always reflects whatever's been `add()`-ed so far. Unlike
+        `InducedModel.vars`, no `index_in_ctx` is assigned yet on any of these - that still only
+        happens in `induce()` (see the module docstring).
+        """
+        named_vars: dict[str, Var] = dict(self.free_vars)
+        for entity_name, entity in self.entities.items():
+            for var in entity.vars():
+                named_vars[f"{entity_name}.{var.name}"] = var
+        return named_vars
+
+    @property
+    def consts(self) -> "dict[str, Const]":
+        """Same idea as `vars`, for entity-owned and free-standing Consts. Process-owned consts
+        aren't included - which processes even exist can still be ambiguous (see ChooseProcess)
+        until `induce()` resolves them."""
+        named_consts: dict[str, Const] = dict(self.free_consts)
+        for entity_name, entity in self.entities.items():
+            for const in entity.consts():
+                named_consts[f"{entity_name}.{const.name}"] = const
+        return named_consts
+
     def _lookup_var(self, entity_name: "str | None", var_name: str) -> Var:
         """Finds a Var by (entity_name, var_name) - entity_name is None for a bare top-level Var."""
         if entity_name is None:
@@ -583,13 +623,9 @@ def _induce_single(model: Model) -> "InducedModel":
     assert not model.pending_process_choices, "model still has unresolved ChooseProcess slots"
 
     # --- collect every var/const, under the dotted names used throughout the rest of PyBM ---
-    named_vars: dict[str, Var] = dict(model.free_vars)
-    named_consts: dict[str, Const] = dict(model.free_consts)
-    for entity_name, entity in model.entities.items():
-        for var in entity.vars():
-            named_vars[f"{entity_name}.{var.name}"] = var
-        for const in entity.consts():
-            named_consts[f"{entity_name}.{const.name}"] = const
+    named_vars: dict[str, Var] = model.vars
+    named_consts: dict[str, Const] = model.consts  # extended below with process-owned consts
+
     def collect_process_consts(process: Process, path: str):
         for const_name, const in process.own_consts.items():
             named_consts[f"{path}.{const_name}"] = const
@@ -651,19 +687,34 @@ class InducedModel:
         """Returns every endogenous variable in the model."""
         return [var for var in self.vars.values() if var.type == "endo"]
 
-    def switch_engine(self, engine: Literal["scipy", "torch", "jax"]) -> "InducedModel":
+    def switch_engine(
+        self, engine: Literal["scipy", "torch", "jax"], device: "torch.device | str | None" = None
+    ) -> "InducedModel":
         """
         Switches this model's compute engine in place: updates `self.engine`, and converts every
         variable's attached data (see `TimeSeries`) to match - so exogenous reads (`Var.__call__`)
         return values of the type the new engine's equations expect. Equations themselves (`Expr`
         trees) never need converting - they already dispatch on whatever type of value they're
         actually handed (see expr.py/func.py), regardless of `engine`. Returns `self`, for chaining.
+
+        `device` (torch-only - ignored otherwise) places every exogenous variable's data there too,
+        e.g. `model.switch_engine("torch", device="cuda")` - needed to actually run on a GPU: the
+        state/const tensors an optimizer builds go wherever *it* was told to put them (see
+        `estimate_gradient_matching`'s/`estimate_torch`'s own `device` argument), but an exogenous
+        variable's data only ever moves when *this* method runs, so it has to be told the same
+        device explicitly, or a mixed-device equation (e.g. `env.temperature / refTemp`) raises the
+        moment it evaluates.
         """
         self.engine = engine
-        converter = {"torch": "to_torch", "jax": "to_jax", "scipy": "to_numpy"}[engine]
         for var in self.vars.values():
-            if var.data is not None:
-                getattr(var.data, converter)()
+            if var.data is None:
+                continue
+            if engine == "torch":
+                var.data.to_torch(device=device)
+            elif engine == "jax":
+                var.data.to_jax()
+            else:
+                var.data.to_numpy()
         return self
 
     def __str__(self):

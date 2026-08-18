@@ -81,6 +81,13 @@ class BinOp:
     right: Any
 
 
+def _sign(x: Any) -> Any:
+    # comparison + subtraction already dispatch generically across numpy/torch/jax - and, being a
+    # plain module-level function rather than a lambda, this stays picklable (see
+    # pybm.func._apply_dispatched_math's note on why that matters).
+    return (x > 0) - (x < 0)
+
+
 _FUNCS: "dict[str, Callable]" = {
     # dispatched by the runtime type of the (possibly batched, torch/jax) value they're actually
     # called with - see pybm.func._dispatched_math/_dispatched_binary - not plain `math.*`, which
@@ -90,7 +97,7 @@ _FUNCS: "dict[str, Callable]" = {
     "pow": _dispatched_binary("power", torch_name="pow"),
     "sin": _dispatched_math("sin"),
     "cos": _dispatched_math("cos"),
-    "sign": lambda x: (x > 0) - (x < 0),  # comparison + subtraction already dispatch generically
+    "sign": _sign,
     "min": _dispatched_binary("minimum"),
     "max": _dispatched_binary("maximum"),
     "log": _dispatched_math("log"),
