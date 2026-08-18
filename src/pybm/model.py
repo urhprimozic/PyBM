@@ -586,8 +586,19 @@ class Model:
         the whole model (so this combination can never mutate/be mutated by any other), picks the
         chosen option for each open choice within that copy, then hands off to `_induce_single`
         for aggregation + indexing.
+
+        `Var.data` (observed measurements) is the one exception - it never differs across
+        branches (it's the same real-world input regardless of which structural choice is made),
+        and nothing in this codebase mutates it per-branch (only `InducedModel.switch_engine`
+        reassigns it, uniformly, for every var). Pre-seeding deepcopy's memo with these objects
+        tells it to reuse the SAME `TimeSeries` instance in every branch instead of cloning
+        (potentially large) observed data N times over. A fresh memo is built per call (not
+        reused across branches) - only these `Var.data` entries are meant to be shared; reusing
+        the whole memo would also start sharing the STRUCTURAL objects (entities, vars, consts)
+        that must stay independent per branch.
         """
-        model_copy: Model = _copy.deepcopy(self)
+        memo = {id(var.data): var.data for var in self.vars.values() if var.data is not None}
+        model_copy: Model = _copy.deepcopy(self, memo)
 
         for (entity_name, var_name, attr), option_index in zip(var_choices, var_combo):
             var = model_copy._lookup_var(entity_name, var_name)
