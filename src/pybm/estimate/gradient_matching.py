@@ -62,6 +62,7 @@ from scipy.optimize import least_squares, minimize as scipy_minimize
 from torch.func import jacfwd
 
 from pybm.estimate.multishooting_torch import _make_rhs, _split_endo_vars, uniform_sub_indices
+from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Var
 
 # ---------------------------------------------------------------------------
@@ -246,7 +247,7 @@ def _fit_constants(
 
 
 @dataclass
-class GradientMatchingResult:
+class GradientMatchingResult(ParamEstimationResults):
     model: InducedModel
     t_eval: np.ndarray
     consts: np.ndarray  # (n_consts,), ordered by const.index_in_ctx
@@ -292,7 +293,6 @@ class GradientMatchingResult:
             params = params + torch.as_tensor(noise, dtype=dtype, device=device)
 
         return params
-
 
 def estimate_gradient_matching(
     model: InducedModel,

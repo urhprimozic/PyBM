@@ -6,7 +6,7 @@ whatever scratch value they started with. Run directly: python -m pybm.tests.tes
 import numpy as np
 
 from pybm.model import Var, Const, Model, Context
-from pybm.simulate.predict import simulate
+from pybm.simulate.trajectory import simulate
 
 
 def test_algebraic_variable_tracks_state_not_frozen():
