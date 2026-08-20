@@ -18,6 +18,7 @@ from pybm.estimate.multishooting_torch import (
     _build_subinterval_grid,
     _make_solver,
     _solve_segments,
+    _split_endo_vars,
     _stitch_trajectory,
     uniform_sub_indices,
 )
@@ -42,7 +43,10 @@ def simulate_multishooting(
 
     The parameter layout matches `estimate_torch`:
         [consts..., s_0, s_1, ..., s_{K-1}]
-    where each shooting state s_i seeds segment i.
+    where each shooting state s_i seeds segment i - one entry per DIFFERENTIAL ("state") variable
+    only (`pybm.estimate.multishooting_torch._split_endo_vars`), not per endogenous variable:
+    algebraic variables are re-derived and frozen variables are held fixed by the solver's own RHS
+    (`_make_rhs`), so neither needs - or accepts - a seed of their own here.
 
     Pass the same `sub_indices` used to fit `params` if it was fit with an
     explicit (non-uniform) segment layout -- otherwise the reconstruction
@@ -53,9 +57,9 @@ def simulate_multishooting(
             f"simulate_multishooting requires an InducedModel built with engine='torch', got engine={model.engine!r}."
         )
 
-    vars_ = model.get_endo_variables()
+    state_vars, algebraic_vars, frozen_values = _split_endo_vars(model)
     n_consts = len(model.consts)
-    n_vars = len(vars_)
+    n_vars = len(state_vars)
     device = device or torch.device("cpu")
 
     if sub_indices is not None:
@@ -73,18 +77,22 @@ def simulate_multishooting(
     grid = _build_subinterval_grid(
         np.asarray(t_eval, dtype=float), n_subintervals, device, dtype, sub_indices=sub_indices
     )
-    solver = _make_solver(vars_, solver_atol, solver_rtol, max_steps=solver_max_steps, dt_min=solver_dt_min)
+    solver = _make_solver(
+        state_vars, algebraic_vars, frozen_values, solver_atol, solver_rtol,
+        max_steps=solver_max_steps, dt_min=solver_dt_min,
+    )
 
     const_ctx = params_t[:, :n_consts]
     initials = params_t[:, n_consts : n_consts + n_subintervals * n_vars].reshape(
         params_t.shape[0], n_subintervals, n_vars
     )
-    ys = _solve_segments(vars_, const_ctx, initials, grid, solver)
+    ys = _solve_segments(state_vars, const_ctx, initials, grid, solver)
     stitched = _stitch_trajectory(ys, grid)
 
     return SimpleNamespace(
         t=np.asarray(t_eval, dtype=float),
         y=stitched[0].detach().cpu().numpy().T,
+        vars=[var.name for var in state_vars],
         success=True,
         message="multiple-shooting reconstruction",
     )
@@ -98,18 +106,20 @@ def simulate(model: InducedModel, t_eval, consts, initial=None, **kwargs):
     for what's returned and for `**kwargs`), so it's exactly as sensitive
     to a bad `consts` guess as any single-shooting integration is.
 
-    `initial`, if omitted, is read off each endogenous variable's observed
-    data at `t_eval[0]` (falling back to its declared `.initial` if it has
-    no data) -- the same convention `_sample_initial_params` uses.
+    `initial`, if omitted, is read off each DIFFERENTIAL ("state") variable's observed data at
+    `t_eval[0]` (falling back to its declared `.initial` if it has no data) -- the same convention
+    `_sample_initial_params` uses. Only state variables need (or accept) an initial value here -
+    algebraic/frozen variables are re-derived/held fixed by the solver itself, see
+    `simulate_multishooting`.
     """
-    vars_ = model.get_endo_variables()
+    state_vars, _, _ = _split_endo_vars(model)
     t_eval = np.asarray(t_eval, dtype=float)
 
     if initial is None:
         t0 = t_eval[0]
         initial = [
             float(var.data(t0)) if var.data is not None else (var.initial or 0.0)
-            for var in vars_
+            for var in state_vars
         ]
 
     params = np.concatenate([np.asarray(consts, dtype=float), np.asarray(initial, dtype=float)])
@@ -131,8 +141,11 @@ def MSE(model: InducedModel, t_eval, n_subintervals: int, consts, sub_indices: O
     full-horizon forward simulation (see `simulate`) -- the harshest,
     most single-shooting-sensitive setting; larger `n_subintervals` gives
     a more local, more forgiving picture of the same `consts`.
+
+    Only compares DIFFERENTIAL ("state") variables - see `simulate_multishooting` - each of which
+    must have `.data` set (raises via `var.data(t)` otherwise).
     """
-    vars_ = model.get_endo_variables()
+    state_vars, _, _ = _split_endo_vars(model)
     t_eval = np.asarray(t_eval, dtype=float)
 
     if sub_indices is None:
@@ -142,7 +155,7 @@ def MSE(model: InducedModel, t_eval, n_subintervals: int, consts, sub_indices: O
         n_subintervals = len(sub_indices) - 1
 
     seeds = np.array(
-        [[float(var.data(t_eval[sub_indices[i]])) for var in vars_] for i in range(n_subintervals)],
+        [[float(var.data(t_eval[sub_indices[i]])) for var in state_vars] for i in range(n_subintervals)],
         dtype=float,
     )
     params = np.concatenate([np.asarray(consts, dtype=float), seeds.reshape(-1)])
@@ -150,5 +163,5 @@ def MSE(model: InducedModel, t_eval, n_subintervals: int, consts, sub_indices: O
     sim = simulate_multishooting(
         model, t_eval, params, n_subintervals=n_subintervals, sub_indices=sub_indices, **kwargs
     )
-    observed = np.stack([[float(var.data(t)) for t in t_eval] for var in vars_])
+    observed = np.stack([[float(var.data(t)) for t in t_eval] for var in state_vars])
     return float(np.mean((sim.y - observed) ** 2))

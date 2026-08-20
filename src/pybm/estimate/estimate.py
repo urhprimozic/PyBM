@@ -48,6 +48,7 @@ def _singleshooting_loss(
     max_iter: int = 200,
     lr: float = 0.05,
     device: "torch.device | str | None" = None,
+    verbose: int = 0,
 ) -> float:
     """
     Returns the minimal loss (MSE) of a single, whole-horizon trajectory simulated with the given
@@ -97,13 +98,15 @@ def _singleshooting_loss(
     base_var_ctx = get_ctx(model, t=float(t_eval[0]))["vars"]
     x0 = np.array([base_var_ctx[var.index_in_ctx] for var in state_vars], dtype=float)
 
+    if verbose:
+        print(f"Integrating model with engine {method}..")
     if method == "scipy":
         return _singleshooting_loss_scipy(
-            model, t_eval, const_ctx, state_vars, data, base_var_ctx, x0
+            model, t_eval, const_ctx, state_vars, data, base_var_ctx, x0, verbose=verbose,max_iter=max_iter
         )
     elif method == "torch":
         return _singleshooting_loss_torch(
-            model, t_eval, const_ctx, state_vars, data, x0, max_iter=max_iter, lr=lr, device=device
+            model, t_eval, const_ctx, state_vars, data, x0, max_iter=max_iter, lr=lr, device=device, verbose=verbose
         )
     else:
         raise ValueError(f"Unknown method {method!r}. Use 'scipy' or 'torch'.")
@@ -117,6 +120,8 @@ def _singleshooting_loss_scipy(
     data: np.ndarray,
     base_var_ctx,
     x0: np.ndarray,
+    verbose: int = 0,
+    max_iter : int = 200
 ) -> float:
     const_ctx = np.asarray(
         const_ctx.detach().cpu().numpy() if torch.is_tensor(const_ctx) else const_ctx,
@@ -134,7 +139,7 @@ def _singleshooting_loss_scipy(
         pred = np.stack([sol.y[var.index_in_ctx] for var in state_vars])
         return (pred - data).ravel()
 
-    result = least_squares(residuals, x0=x0, method="trf")
+    result = least_squares(residuals, x0=x0, method="trf", verbose=verbose, ftol=1e-3, xtol=1e-3, gtol=1e-3, max_nfev=max_iter)
     return float(np.mean(result.fun**2))
 
 
@@ -148,6 +153,7 @@ def _singleshooting_loss_torch(
     max_iter: int,
     lr: float,
     device: "torch.device | str | None" = None,
+    verbose: int = 0,
 ) -> float:
     if model.engine != "torch":
         raise ValueError(
@@ -185,7 +191,7 @@ def _singleshooting_loss_torch(
         traj_res, _, _ = _residuals(ys, initials, grid, data_t)
         return traj_res.sum()  # single candidate - sum == that candidate's own loss
 
-    for _ in range(max_iter):
+    for _ in tqdm(range(max_iter), desc="Single-shooting loss optimization", disable=verbose == 0):
         optimizer.zero_grad()
         loss = loss_fn()
         loss.backward()
@@ -196,10 +202,36 @@ def _singleshooting_loss_torch(
 
 @dataclass
 class FullEstimationResults:
+    """
+    The winning structure/constants from a full `estimate_model` (or `estimate_model_decomposed`)
+    search, plus every individual result that was compared to find it.
+
+    Parameters
+    ----------
+    best_consts : np.ndarray | torch.Tensor
+        The winning constants, ordered by `const.index_in_ctx` in `best_model` - directly usable
+        with `pybm.estimate.analysis_torch.simulate(best_model, t_eval, best_consts)`.
+    best_const_by_name : dict[str, float]
+        The same winning constants, keyed by name instead of index.
+    best_loss : float
+        The winning trajectory loss (`_singleshooting_loss`) - real forward-simulated MSE against
+        the data, not the gradient-matching residual used to rank candidates internally.
+    all_results : list[ParamEstimationResults]
+        Every individual result compared along the way: one per candidate structure for
+        `estimate_model`, or one per independent block for `estimate_model_decomposed` (see that
+        function's docstring - NOT one per raw candidate there, and no single entry's own `.model`
+        is guaranteed to be the final, fully-resolved structure in that case).
+    best_model : InducedModel | None
+        The final, fully-resolved model `best_consts` belongs to - the one to pass to
+        `pybm.estimate.analysis_torch.simulate` for a trajectory plot. `None` only for older
+        results that predate this field (e.g. an unpickled `FullEstimationResults` saved before it
+        was added).
+    """
     best_consts : np.ndarray | torch.Tensor | Any
     best_const_by_name : dict[str, float | Any]
     best_loss : float | np.ndarray | torch.Tensor | Any
     all_results : list[ParamEstimationResults]
+    best_model : "InducedModel | None" = None
 
 
 def _worker_init():
@@ -266,7 +298,7 @@ def _estimate_one(
         if verbose >= 2:
             print("Calculating model loss..")
         results.loss = _singleshooting_loss(
-            model, t_eval, results.consts, method=engine, max_iter=max_iter_loss, device=device
+            model, t_eval, results.consts, method=engine, max_iter=max_iter_loss, device=device, verbose=verbose
         )
     except Exception as e:
         print(f"Error occurred while estimating model #{index}: {e}.")
@@ -281,6 +313,7 @@ def estimate_model(
     incomplete_model,
     t_eval: np.ndarray | torch.Tensor | Any,
     recepie: recepies = "gp",
+    decompose: bool = False,
     parallel=False,
     max_workers: "int | None" = None,
     n_intervals_ms=50,
@@ -294,6 +327,7 @@ def estimate_model(
     xtol: float = 1e-4,
     gtol: float = 1e-4,
     max_nfev: "int | None" = 1000,
+    collocation_times=None,
     *args,
     **kwargs,
 ):
@@ -311,6 +345,17 @@ def estimate_model(
             - "ms" for Multishooting.
 
         Default is "gp".
+    decompose : bool, optional
+        If true, delegates to `pybm.estimate.decompose.estimate_model_decomposed` instead of the
+        brute-force search below: partitions the model's state variables into independent groups
+        (see `pybm.model_graph.build_blocks`) and solves each group's own, much smaller, structural
+        search separately - exact, not a heuristic approximation, given gradient matching's own
+        pre-existing "trust the GP, don't simulate" approximation (which this does not add to).
+        Only supported for `recepie="gp"` (raises `ValueError` otherwise) - `"gp+ms"`/`"ms"`
+        genuinely integrate the ODE, which really does couple every state variable through the
+        shared time-stepping, so this decomposition would not be valid there. When `True`,
+        `parallel`/`max_workers`/`n_intervals_ms` are ignored (not yet supported by the decomposed
+        path). Default is false.
     parallel : bool, optional
         If true, different structural candidates are estimated in separate worker PROCESSES
         (`concurrent.futures.ProcessPoolExecutor`), not threads - this is CPU-bound work (GP
@@ -342,11 +387,28 @@ def estimate_model(
         `pybm.estimate.gradient_matching.estimate_gradient_matching`). Loosen these to trade fit
         accuracy for speed - this recipe is only a fast initializer to begin with (see that
         module's docstring), so an approximate answer is often good enough.
+    collocation_times : array-like, optional
+        `decompose=True` only - forwarded to `estimate_gradient_matching` for every candidate; see
+        that function's own `collocation_times` parameter. Defaults to `t_eval`. (The non-decomposed
+        path below can already be reached via `**kwargs`, unchanged.)
     *args :
         Additional positional arguments to be passed to the estimator function.
     **kwargs :
         Additional keyword arguments to be passed to the estimator function.
     """
+    if decompose:
+        if recepie != "gp":
+            raise ValueError(f"decompose=True only supports recepie='gp', got recepie={recepie!r}.")
+        # imported here, not at module level, to avoid a circular import: decompose.py itself
+        # imports FullEstimationResults/_singleshooting_loss from this module.
+        from pybm.estimate.decompose import estimate_model_decomposed
+
+        return estimate_model_decomposed(
+            incomplete_model, t_eval, engine=engine, device=device, collocation_times=collocation_times,
+            max_iter_loss=max_iter_loss, verbose=verbose, max_gp_iter=max_gp_iter, max_gp_points=max_gp_points,
+            ftol=ftol, xtol=xtol, gtol=gtol, max_nfev=max_nfev,
+        )
+
     # get estimator function based on recepie
     estimator: Callable[[Model, Any], ParamEstimationResults] | Any
     if recepie == "gp":
@@ -365,14 +427,18 @@ def estimate_model(
     # never on which structural candidate is chosen elsewhere in the model - fit it ONCE here,
     # against the ORIGINAL incomplete_model's vars (data is attached before induce() and
     # deep-copied identically into every branch, so this is exactly the same fit every branch
-    # would otherwise redo from scratch). Matched by variable name in estimate_gradient_matching,
-    # so it doesn't matter whether a given variable ends up state/algebraic/frozen in any specific
+    # would otherwise redo from scratch). Matched by qualified variable name (e.g. "phyto.conc",
+    # not the bare "conc" - see `_qualified_var_names`) in estimate_gradient_matching, so it
+    # doesn't matter whether a given variable ends up state/algebraic/frozen in any specific
     # branch - an unused entry here is simply never looked up.
     gps = None
     if recepie == "gp":
-        vars_with_data = [var for var in incomplete_model.vars.values() if var.data is not None]
+        vars_with_data = {name: var for name, var in incomplete_model.vars.items() if var.data is not None}
         if vars_with_data:
             gps = fit_gps(vars_with_data, max_gp_points=max_gp_points, max_gp_iter=max_gp_iter, verbose=verbose)
+
+    if verbose >= 1:
+        print(f"Estimating...")
 
     if parallel:
         with ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init) as executor:
@@ -411,5 +477,6 @@ def estimate_model(
         best_consts=best_result.consts,
         best_loss=best_result.loss,
         best_const_by_name=best_result.const_by_name,
-        all_results=all_results
+        all_results=all_results,
+        best_model=best_result.model,
     )

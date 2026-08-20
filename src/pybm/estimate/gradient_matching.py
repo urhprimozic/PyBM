@@ -107,6 +107,18 @@ class _FittedGP:
         return k_star_deriv @ self.alpha
 
 
+def _qualified_var_names(model: InducedModel) -> "dict[int, str]":
+    """Maps `id(var) -> model.vars`' dotted key for it (e.g. "phyto.conc", "ortp.conc").
+
+    `var.name` alone is only the LOCAL template attribute name ("conc") and collides whenever a
+    library reuses the same attribute name across multiple entities - exactly what happens in the
+    Bled model, where `ortp.conc`, `no.conc`, `silica.conc`, `daph.conc` and `phyto.conc` all have
+    `var.name == "conc"`. The `gps` dict below is keyed by this qualified name instead, so each
+    entity's own observed data stays matched to its own GP.
+    """
+    return {id(var): name for name, var in model.vars.items()}
+
+
 def _series_as_numpy(t: Any, x: Any) -> tuple[np.ndarray, np.ndarray]:
     if torch.is_tensor(t):
         t = t.detach().cpu().numpy()
@@ -281,13 +293,14 @@ class GradientMatchingResult(ParamEstimationResults):
         """
         device = device or torch.device("cpu")
         vars_, _, _ = _split_endo_vars(self.model)  # state vars only - see estimate_torch's init_params layout
+        qualified = _qualified_var_names(self.model)
 
         sub_indices = uniform_sub_indices(self.t_eval, n_subintervals)
         seed_times = self.t_eval[sub_indices[:-1]]
 
         seeds = np.zeros((n_subintervals, len(vars_)), dtype=float)
         for i, var in enumerate(vars_):
-            seeds[:, i] = self.gps[var.name].mean(seed_times)
+            seeds[:, i] = self.gps[qualified[id(var)]].mean(seed_times)
 
         flat = np.concatenate([self.consts, seeds.reshape(-1)])
         params = torch.as_tensor(flat, dtype=dtype, device=device).unsqueeze(0).repeat(n_candidates, 1)
@@ -301,26 +314,32 @@ class GradientMatchingResult(ParamEstimationResults):
         return params
 
 def fit_gps(
-    vars_: "list[Var]", max_gp_points: int = 300, max_gp_iter: int = 200, verbose: int = 0
+    vars_: "dict[str, Var]", max_gp_points: int = 300, max_gp_iter: int = 200, verbose: int = 0
 ) -> "dict[str, _FittedGP]":
     """
-    Fits one GP per variable in `vars_`, keyed by name - step 1 of gradient matching, split out on
-    its own because it depends ONLY on a variable's own observed data (`var.data`), never on a
-    model's equations/structure. That makes it safe (and, across a structural search over many
-    induced models sharing the same underlying data, a large amount of redundant work to skip) to
-    fit ONCE up front and reuse across every candidate model - see `estimate_gradient_matching`'s
-    `gps` argument and `pybm.estimate.estimate.estimate_model`, which does exactly that.
+    Fits one GP per variable in `vars_`, keyed by the SAME dotted name given here (e.g.
+    `model.vars`' key, like "phyto.conc") - step 1 of gradient matching, split out on its own
+    because it depends ONLY on a variable's own observed data (`var.data`), never on a model's
+    equations/structure. That makes it safe (and, across a structural search over many induced
+    models sharing the same underlying data, a large amount of redundant work to skip) to fit ONCE
+    up front and reuse across every candidate model - see `estimate_gradient_matching`'s `gps`
+    argument and `pybm.estimate.estimate.estimate_model`, which does exactly that.
+
+    Takes a `dict`, not a bare `list[Var]`, specifically so the caller supplies a key that's
+    actually unique per variable - `var.name` alone is only the local template attribute name
+    ("conc"), which multiple different entities can share (see `_qualified_var_names`); keying by
+    that would silently let one entity's GP clobber another's.
     """
     gps: dict[str, _FittedGP] = {}
-    for var in vars_:
+    for name, var in vars_.items():
         if var.data is None:
-            raise ValueError(f"Variable {var.name} has no data; gradient matching needs an observed trajectory.")
+            raise ValueError(f"Variable {name} has no data; gradient matching needs an observed trajectory.")
         t_obs, y_obs = _series_as_numpy(var.data.t, var.data.x)
-        gps[var.name] = _fit_gp_1d(t_obs, y_obs, max_points=max_gp_points, max_iter=max_gp_iter)
+        gps[name] = _fit_gp_1d(t_obs, y_obs, max_points=max_gp_points, max_iter=max_gp_iter)
         if verbose>= 2:
-            gp = gps[var.name]
+            gp = gps[name]
             print(
-                f"[gradient_matching] {var.name}: lengthscale={gp.lengthscale:.4g} "
+                f"[gradient_matching] {name}: lengthscale={gp.lengthscale:.4g} "
                 f"signal_std={gp.signal_var**0.5:.4g} noise_std={gp.noise_var**0.5:.4g} "
                 f"log_marginal_likelihood={gp.log_marginal_likelihood:.4g}"
             )
@@ -395,19 +414,20 @@ def estimate_gradient_matching(
     collocation_times = np.asarray(t_eval if collocation_times is None else collocation_times, dtype=float)
 
     vars_, _, _ = _split_endo_vars(model)  # only differential ("state") vars have a trajectory to GP-fit
+    qualified = _qualified_var_names(model)
     gps = dict(gps) if gps is not None else {}
-    missing = [var for var in vars_ if var.name not in gps]
+    missing = {qualified[id(var)]: var for var in vars_ if qualified[id(var)] not in gps}
     if missing:
         gps.update(fit_gps(missing, max_gp_points=max_gp_points, max_gp_iter=max_gp_iter, verbose=verbose))
 
-    state_at_collocation = np.stack([gps[var.name].mean(collocation_times) for var in vars_])
-    deriv_at_collocation = np.stack([gps[var.name].mean_deriv(collocation_times) for var in vars_])
+    state_at_collocation = np.stack([gps[qualified[id(var)]].mean(collocation_times) for var in vars_])
+    deriv_at_collocation = np.stack([gps[qualified[id(var)]].mean_deriv(collocation_times) for var in vars_])
 
     result = _fit_constants(
         model, vars_, state_at_collocation, deriv_at_collocation, collocation_times, device, dtype,
         ftol=ftol, xtol=xtol, gtol=gtol, max_nfev=max_nfev,
     )
-    if verbose:
+    if verbose >= 2:
         print(f"[gradient_matching] constant fit: cost={result.cost:.4g} success={result.success}")
 
     const_by_name = {name: float(result.x[c.index_in_ctx]) for name, c in model.consts.items()}

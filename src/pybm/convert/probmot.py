@@ -7,22 +7,31 @@ language (+,-,*,/, unary minus, exp/pow/sin/cos/sign/min/max/log/log10, `inf`). 
 fully-specified (.pbm `model`) and parameter-incomplete (`null` values) files directly.
 
 Structural incompleteness (a `.pbm` `processes:` entry naming an *abstract* process template,
-meaning "any leaf descendant is a candidate") is supported via `ChooseProcess`, but with one
-simplification: ProBMoT lets an abstract reference appear *nested* inside another process's own
-sub-process list. `ChooseProcess` (see model.py) is a `Model`-level primitive, not something that
-nests inside a `Process`. Rather than building nested-choice support (a separate, larger extension),
-an abstract nested reference is *flattened*: it's registered as its own top-level `ChooseProcess` in
-the `Model` (under a synthesized name) instead of staying nested under its logical parent process.
-This changes constant *namespacing* for that slot's local consts (they end up under the synthesized
-top-level name, not `parent.slotname...`) but not the resulting equations/simulation behavior -
-PyBM's per-variable aggregation combines contributions from any process regardless of which
-container (if any) it's nested under.
+meaning "any leaf descendant is a candidate") is supported via `ChooseProcess`. `ChooseProcess`
+(see model.py) is a `Model`-level primitive, not something that nests inside a `Process` - but
+ProBMoT lets an abstract reference appear *nested* inside another process's own sub-process list
+(e.g. `TempRespInfluence`, declared only via `Temp1RespirationPP`/`Temp2RespirationPP`'s shared
+`TempRespirationPP` ancestor, never via the sibling `ExponentialRespirationPP`). An anonymous
+nested reference (one the `.pbm` never explicitly names) is therefore *cross-product-expanded
+into its enclosing candidate* rather than flattened out as its own top-level slot - see
+`ModelBuilder._build_leaf_candidates`/`_build_bare_candidates` for the full reasoning. Flattening
+it to a sibling top-level slot instead (an earlier version of this converter did exactly that) is
+a real correctness bug, not a harmless simplification: `Model.induce()` would then vary that
+nested slot independently of whether its own enclosing leaf (e.g. `Temp1RespirationPP`) is even
+the one `RespirationPP` picks, producing structurally duplicate induced models whenever a sibling
+leaf without that nesting (e.g. `ExponentialRespirationPP`) is chosen instead - confirmed on the
+real Bled library, where it inflated 4032 truly distinct structures into 5184 induced ones. A
+reference the `.pbm` DOES explicitly name (in some process's own `processes:` list) is still
+flattened to a top-level `ChooseProcess` when ambiguous - that is a genuinely independent,
+author-declared structural choice, not a conditionally-relevant nested one, and constant
+namespacing for it still ends up under the synthesized top-level name, not `parent.slotname...`.
 
 NOT covered: compartments, incomplete process *arguments* (the `[[],[...]]` bound syntax).
 """
 
 from __future__ import annotations
 
+import itertools as _itertools
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -762,65 +771,104 @@ class ModelBuilder:
                     slots.append((ref.template_name, slot_roles))
         return slots
 
-    # ---- building a concrete (leaf) process ----
+    # ---- building a concrete (leaf) process, expanding its own nested ambiguity ----
 
-    def _build_concrete(self, template_name: str, role_bindings: RoleBindings, consts_override: dict,
-                         sub_process_overrides: "list[str] | None", proc_name: str) -> Process:
+    def _build_leaf_candidates(
+        self, template_name: str, role_bindings: RoleBindings, consts_override: dict,
+        sub_process_overrides: "list[str] | None", name_hint: str,
+    ) -> "list[Process]":
+        """Builds every fully-resolved candidate `Process` for ONE already-chosen leaf template.
+
+        Returns exactly one Process, UNLESS `sub_process_overrides` is `None` (no .pbm-given name
+        for this leaf's own slots - i.e. this leaf's nested sub-processes, if any, were never
+        explicitly named/pinned in the `.pbm`) AND at least one of those own slots is itself
+        structurally ambiguous - in which case this returns one Process per combination of those
+        slots' own candidates (a full cross product), each with a *concrete* choice already baked
+        in for every nested slot.
+
+        This is what keeps a slot like `TempRespInfluence` - declared only via
+        `Temp1RespirationPP`/`Temp2RespirationPP`'s shared `TempRespirationPP` ancestor, never via
+        `ExponentialRespirationPP` - from ending up as an independent top-level `ChooseProcess`
+        that `Model.induce()` would vary regardless of whether `Temp1`/`Temp2RespirationPP` is even
+        the sibling `RespirationPP` picks (which produced 5184 induced Bled models, of which only
+        4032 were actually structurally distinct - the other 1152 varied a nested slot whose value
+        no equation in that branch ever reads). Instead, the caller (`_build_bare_candidates`,
+        recursively) bakes the cross product straight into `RespirationPP`'s own candidate list -
+        7 candidates (1 Exponential + 3 Temp1 + 3 Temp2), not 3, with no separate slot left over.
+        """
         const_specs = self.library.process_consts(template_name)
-        consts = {
-            cs.name: Const(
-                cs.name, initial_value=consts_override.get(cs.name, {}).get("value"),
-                range=cs.attrs.get("range"), unit=cs.attrs.get("unit"),
-            )
-            for cs in const_specs
-        }
-        equations = self._build_equations(template_name, role_bindings, consts)
+
+        def fresh_consts() -> "dict[str, Const]":
+            return {
+                cs.name: Const(
+                    cs.name, initial_value=consts_override.get(cs.name, {}).get("value"),
+                    range=cs.attrs.get("range"), unit=cs.attrs.get("unit"),
+                )
+                for cs in const_specs
+            }
 
         slots = self._collect_slots(template_name, role_bindings)
-        nested: "list[Process]" = []
+
         if sub_process_overrides is not None:
             assert len(slots) == len(sub_process_overrides), (
-                f"{proc_name}: {template_name} declares {len(slots)} sub-process slot(s), "
+                f"{name_hint}: {template_name} declares {len(slots)} sub-process slot(s), "
                 f"but the .pbm instance lists {len(sub_process_overrides)}: {sub_process_overrides}"
             )
+            consts = fresh_consts()
+            equations = self._build_equations(template_name, role_bindings, consts)
+            nested: "list[Process]" = []
             for (slot_template, slot_roles), given_name in zip(slots, sub_process_overrides):
                 resolved = self._resolve_sub_process_slot(given_name, slot_template, slot_roles)
                 if resolved is not None:
                     nested.append(resolved)
-        else:
-            for slot_template, slot_roles in slots:
-                resolved = self._build_bare_template_ref(slot_template, slot_roles)
-                if isinstance(resolved, ChooseProcess):
-                    self.model.add(resolved)
-                else:
-                    nested.append(resolved)
+            return [Process(*equations, *nested, *consts.values(), name=name_hint)]
 
-        return Process(*equations, *nested, *consts.values(), name=proc_name)
+        # No .pbm-given names for this leaf's own slots - cross product over each slot's own
+        # (possibly single-item) candidate list, so every returned Process is fully concrete.
+        slot_candidate_lists = [
+            self._build_bare_candidates(slot_template, slot_roles) for slot_template, slot_roles in slots
+        ]
+        out: "list[Process]" = []
+        combos = _itertools.product(*slot_candidate_lists) if slot_candidate_lists else [()]
+        for combo in combos:
+            consts = fresh_consts()
+            equations = self._build_equations(template_name, role_bindings, consts)
+            out.append(Process(*equations, *combo, *consts.values(), name=self._anon_name(template_name)))
+        return out
 
-    def _build_bare_template_ref(self, template_name: str, role_bindings: RoleBindings) -> "Process | ChooseProcess":
-        """An anonymous nested reference with no .pbm-given name/override list at all - if it's
-        structurally ambiguous, produce a ChooseProcess with one already-built Process candidate
-        per leaf descendant."""
-        name = self._anon_name(template_name)
-        if self.library.is_leaf(template_name):
-            return self._build_concrete(template_name, role_bindings, {}, None, name)
-        leaves = self.library.leaf_descendants(template_name)
-        if len(leaves) == 1:
-            return self._build_concrete(leaves[0], role_bindings, {}, None, name)
-        return ChooseProcess(
-            *(self._build_concrete(leaf, role_bindings, {}, None, self._anon_name(leaf)) for leaf in leaves),
-            name=name,
-        )
+    def _build_bare_candidates(self, template_name: str, role_bindings: RoleBindings) -> "list[Process]":
+        """Every fully-resolved candidate `Process` for an ANONYMOUS reference (no .pbm-given name
+        at all) to `template_name`, which may itself be abstract - the Cartesian product of "which
+        leaf template" and each chosen leaf's own nested-slot candidates, recursively (via
+        `_build_leaf_candidates`, which calls back into this function for each of ITS OWN un-named
+        slots). Never returns a `ChooseProcess` - ambiguity is always resolved into the length of
+        the returned list, so a caller can decide for itself whether that multiplicity should
+        become an independent top-level choice (`_resolve_sub_process_slot`, for a name the `.pbm`
+        author explicitly listed) or stay baked into an enclosing candidate
+        (`_build_leaf_candidates`'s own cross-product branch, for everything nested beneath that).
+        """
+        leaves = [template_name] if self.library.is_leaf(template_name) else self.library.leaf_descendants(template_name)
+        out: "list[Process]" = []
+        for leaf in leaves:
+            out.extend(self._build_leaf_candidates(leaf, role_bindings, {}, None, leaf))
+        return out
 
     def _resolve_sub_process_slot(self, given_name: str, slot_template: str, slot_roles: RoleBindings) -> "Process | None":
         if given_name in self.named_processes:
             result = self._resolve_named_instance(given_name)
-        else:
-            result = self._build_bare_template_ref(given_name, slot_roles)
-        if isinstance(result, ChooseProcess):
-            self.model.add(result)  # flatten: register at the model level instead of nesting
-            return None
-        return result
+            if isinstance(result, ChooseProcess):
+                self.model.add(result)  # flatten: register at the model level instead of nesting
+                return None
+            return result
+        candidates = self._build_bare_candidates(given_name, slot_roles)
+        if len(candidates) == 1:
+            return candidates[0]
+        # `given_name` was explicitly listed in the .pbm's OWN `processes:` list for a top-level
+        # (or explicitly-nested) instance - a genuinely independent, author-declared structural
+        # choice, unlike the anonymous, conditionally-relevant nesting `_build_leaf_candidates`
+        # handles above - so flattening it to the model level here is correct.
+        self.model.add(ChooseProcess(*candidates, name=self._anon_name(given_name)))
+        return None
 
     # ---- named, top-level (or explicitly-declared nested) .pbm process instances ----
 
@@ -831,26 +879,14 @@ class ModelBuilder:
         params = self.library.process_params(pspec.template)
         role_bindings = self._role_bindings_from_args(params, pspec.args)
 
-        if self.library.is_leaf(pspec.template):
-            result = self._build_concrete(
-                pspec.template, role_bindings, pspec.consts, pspec.sub_processes, pspec.name
+        leaves = [pspec.template] if self.library.is_leaf(pspec.template) else self.library.leaf_descendants(pspec.template)
+        candidates: "list[Process]" = []
+        for leaf in leaves:
+            leaf_name = pspec.name if len(leaves) == 1 else self._anon_name(leaf)
+            candidates.extend(
+                self._build_leaf_candidates(leaf, role_bindings, pspec.consts, pspec.sub_processes, leaf_name)
             )
-        else:
-            leaves = self.library.leaf_descendants(pspec.template)
-            if len(leaves) == 1:
-                result = self._build_concrete(
-                    leaves[0], role_bindings, pspec.consts, pspec.sub_processes, pspec.name
-                )
-            else:
-                result = ChooseProcess(
-                    *(
-                        self._build_concrete(
-                            leaf, role_bindings, pspec.consts, pspec.sub_processes, self._anon_name(leaf)
-                        )
-                        for leaf in leaves
-                    ),
-                    name=pspec.name,
-                )
+        result = candidates[0] if len(candidates) == 1 else ChooseProcess(*candidates, name=pspec.name)
         self._built[name] = result
         return result
 
