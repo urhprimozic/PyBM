@@ -711,12 +711,21 @@ def _estimate_constraints_single(
         (grad,) = torch.autograd.grad(cont_res, params_t, retain_graph=True)
         return grad.detach().cpu().numpy().reshape(1, -1)
 
-    nlc = NonlinearConstraint(constraint_fun, 0, 0, jac=constraint_jac)  # type: ignore[arg-type]
+    # With a single segment (n_subintervals == 1, plain single-shooting) there is no continuity
+    # gap to enforce at all - `_residuals` returns `cont_res = torch.zeros(...)` as a literal
+    # constant in that case (see its own K==1 branch), disconnected from `params_t`'s graph, so
+    # differentiating it below would raise ("does not have a grad_fn"). Skip the constraint
+    # entirely rather than building one around a quantity that isn't a function of anything.
+    constraints = (
+        [NonlinearConstraint(constraint_fun, 0, 0, jac=constraint_jac)]  # type: ignore[arg-type]
+        if n_subintervals > 1
+        else []
+    )
     result = minimize(
         fun=objective,
         x0=np.asarray(init_params, dtype=float),
         jac=True,
-        constraints=[nlc],
+        constraints=constraints,
         method="trust-constr",
         options={"maxiter": maxiter, "verbose": verbose, "gtol": gtol},
         callback=_make_plateau_callback(patience, gtol),

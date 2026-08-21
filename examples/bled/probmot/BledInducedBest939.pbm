@@ -1,0 +1,137 @@
+// Model #939 for dataset examples/aquatic/data/96.data
+model BledInducedBest939 : AquaticEcosystem;
+
+//Entities
+
+entity ortp : Nutrient {
+	vars:
+		conc { role: exogenous;};
+	consts:
+		alpha = 1.0,
+		halfSaturation = 1.0;
+}
+
+entity no : Nutrient {
+	vars:
+		conc { role: exogenous;};
+	consts:
+		alpha = 1.0,
+		halfSaturation = 1.0;
+}
+
+entity silica : Nutrient {
+	vars:
+		conc { role: exogenous;};
+	consts:
+		alpha = 1.0,
+		halfSaturation = 1.0;
+}
+
+entity phyto : PrimaryProducer {
+	vars:
+		conc { role: endogenous; initial: 0.6070931084495963;},
+		nutrientLim { role: endogenous; initial: 1.0;},
+		lightLim { role: endogenous; initial: 1.0;},
+		growthRate { role: endogenous; initial: 1.0;},
+		tempGrowthLim { role: endogenous; initial: 1.0;},
+		tempRespLim { role: endogenous; initial: 1.0;},
+		tempMortLim { role: endogenous; initial: 1.0;};
+	consts:
+		maxGrowthRate = 0.6516029900666023;
+}
+
+entity daph : Zooplankton {
+	vars:
+		conc { role: exogenous;},
+		phytoLim { role: endogenous; initial: 1.0;},
+		phytoSum { role: endogenous; initial: 1.0;},
+		tempGrowthLim { role: endogenous; initial: 1.0;},
+		tempRespLim { role: endogenous; initial: 1.0;},
+		tempMortLim { role: endogenous; initial: 1.0;};
+	consts:
+		maxFiltrationRate = 15.0,
+		assimilationCoeff = 1.0;
+}
+
+entity env : Environment {
+	vars:
+		temperature { role: exogenous;},
+		light { role: exogenous;},
+		flow { role: exogenous;};
+	consts:
+		volume = 0.0,
+		depth = 10.0,
+		area = 0.0;
+}
+
+//Processes
+
+process nutrientPPInteraction(phyto, [ortp, silica, no], env) : NutrientPrimaryProducerInteraction {
+	processes:
+		lightInfluence713, nutrientInfluence824, nutrientInfluence664, nutrientInfluence953, growth, respirationPP524;
+}
+
+process growth(phyto, [ortp, silica, no], env) : Growth {
+	processes:
+		tempGrowthLim689, growthRate923;
+}
+
+process feedsOn(daph, phyto, env) : FeedsOnFiltration {
+	processes:
+		tempGrowthInfluence70, phytoLim472;
+}
+
+process lightInfluence713(phyto, env) : OptimalLightLim {
+	consts:
+		optLight = 140.42919645642743;
+}
+
+process nutrientInfluence824(phyto, ortp) : NoNutrientLim {
+}
+
+process nutrientInfluence664(phyto, silica) : NoNutrientLim {
+}
+
+process nutrientInfluence953(phyto, no) : NoNutrientLim {
+}
+
+process tempGrowthLim689(phyto, env) : LinearTempGrowthLim {
+	consts:
+		refTemp = 22.0,
+		minTemp = 1.0,
+		optTemp = 1.0;
+}
+
+process growthRate923(phyto, [ortp, silica, no], env) : GrowthRate {
+}
+
+process respirationPP524(phyto, [ortp, silica, no], env) : Temp2RespirationPP {
+	consts:
+		respRate = 0.006043472507553232;
+	processes:
+		tempRespInfluence879;
+}
+
+process tempGrowthInfluence70(daph, env) : LinearTempGrowthLim {
+	consts:
+		refTemp = 12.091141569787668,
+		minTemp = 1.0,
+		optTemp = 1.0;
+}
+
+process phytoLim472(daph, phyto) : Monod2PhytoLim {
+	consts:
+		halfSaturation = 20.0;
+	processes:
+		summation260;
+}
+
+process summation260(daph, phyto) : Summation {
+}
+
+process tempRespInfluence879(phyto, env) : NoTempRespLim {
+}
+//Compartments
+
+//Train Error :RMSEMultiDataset = 0.24951723741130502
+

@@ -14,6 +14,7 @@ from pybm.estimate.multishooting_torch import (
     _residuals,
     _solve_segments,
     _split_endo_vars,
+    uniform_sub_indices,
 )
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import Context, InducedModel, Model, Var
@@ -232,6 +233,91 @@ class FullEstimationResults:
     best_loss : float | np.ndarray | torch.Tensor | Any
     all_results : list[ParamEstimationResults]
     best_model : "InducedModel | None" = None
+
+    def init_params(
+        self,
+        t_eval,
+        n_subintervals: int = 1,
+        n_candidates: int = 1,
+        jitter: float = 0.0,
+        seed: "int | None" = None,
+        device: "torch.device | None" = None,
+        dtype: torch.dtype = torch.float64,
+    ) -> torch.Tensor:
+        """
+        Builds a `[consts..., s_0, ..., s_{K-1}]` tensor in the layout `estimate_torch` expects,
+        for warm-starting multishooting refinement on `best_model` - the same role
+        `GradientMatchingResult.init_params` plays for a single gradient-matching fit, but built
+        directly from this (possibly decomposed) search's already-fitted `best_consts`, without
+        refitting anything.
+
+        Unlike `GradientMatchingResult.init_params`, the shooting-node seeds come straight from
+        each differential ("state") variable's own `.data` (linear interpolation - see
+        `TimeSeries.__call__`) rather than a fitted GP's posterior mean: `FullEstimationResults`
+        doesn't carry the per-block GPs `estimate_model_decomposed` used internally, since those
+        aren't part of its public result. This is the same data-based seeding convention already
+        used elsewhere for exactly this purpose (see `analysis_torch.MSE`'s own segment seeds and
+        `analysis_torch.simulate`'s default `initial`).
+
+        Parameters
+        ----------
+        t_eval : array-like
+            Time points to lay the shooting segments out over - pass the same `t_eval` you will
+            call `estimate_torch` with, so segment boundaries line up.
+        n_subintervals : int, optional
+            Number of shooting segments (K) - must match the `n_subintervals` passed to
+            `estimate_torch`. Default 1 (single-shooting).
+        n_candidates : int, optional
+            How many copies of this same starting point to stack (B) - combine with `jitter` for
+            a cheap multistart around one already-good guess. Default 1.
+        jitter : float, optional
+            Std-dev of Gaussian noise added to every candidate but the first (kept exact at the
+            unperturbed guess) - only applied when `n_candidates > 1`.
+        seed : int, optional
+            RNG seed for `jitter`.
+        device : torch.device, optional
+            Where the returned tensor lives. Default: CPU.
+        dtype : torch.dtype, optional
+            Default `torch.float64`.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape `(n_candidates, n_consts + n_subintervals * n_state_vars)`, ready to pass
+            straight into `estimate_torch`'s own `init_params` argument.
+        """
+        if self.best_model is None:
+            raise ValueError(
+                "init_params needs best_model, but it is None (an unpickled result from before "
+                "that field was added?)."
+            )
+        device = device or torch.device("cpu")
+        t_eval = np.asarray(t_eval, dtype=float)
+        state_vars, _, _ = _split_endo_vars(self.best_model)
+
+        sub_indices = uniform_sub_indices(t_eval, n_subintervals)
+        seed_times = t_eval[sub_indices[:-1]]
+
+        seeds = np.zeros((n_subintervals, len(state_vars)), dtype=float)
+        for i, var in enumerate(state_vars):
+            if var.data is None:
+                raise ValueError(f"Variable {var.name} has no data - can't seed its shooting nodes.")
+            seeds[:, i] = var.data(seed_times)
+
+        consts = np.asarray(
+            self.best_consts.detach().cpu().numpy() if torch.is_tensor(self.best_consts) else self.best_consts,
+            dtype=float,
+        )
+        flat = np.concatenate([consts, seeds.reshape(-1)])
+        params = torch.as_tensor(flat, dtype=dtype, device=device).unsqueeze(0).repeat(n_candidates, 1)
+
+        if jitter and n_candidates > 1:
+            rng = np.random.default_rng(seed)
+            noise = rng.normal(scale=jitter, size=(n_candidates, params.shape[1]))
+            noise[0, :] = 0.0
+            params = params + torch.as_tensor(noise, dtype=dtype, device=device)
+
+        return params
 
 
 def _worker_init():

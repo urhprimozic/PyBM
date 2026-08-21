@@ -1,5 +1,6 @@
 import torch
 
+
 def torch_interp(x, xp, fp):
     """
     Podobno kot np.interp(x, xp, fp)
