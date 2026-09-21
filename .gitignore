@@ -1,6 +1,6 @@
 # data
 data/
-
+src/pybm/benchmark
 # CMA-ES files
 outcmaes/
 
@@ -222,3 +222,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+NV_experiments.zip
