@@ -33,7 +33,7 @@ import warnings
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from itertools import product
-from typing import Any, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 import numpy as np
 import torch
@@ -698,6 +698,38 @@ class InducedModel:
         """Returns every endogenous variable in the model."""
         return [var for var in self.vars.values() if var.type == "endo"]
 
+    def split_endo_vars(self) -> "tuple[list[Var], list[Var], dict[int, float]]":
+        """
+        Splits this model's endogenous variables into differential ("state", actually integrated),
+        algebraic (re-derived at every RHS evaluation - see `_settle_algebraic`) and "frozen"
+        (neither an ODE nor an algebraic equation - held at their initial value for the whole
+        trajectory) - mirrors `pybm.simulate.predict.simulate`'s same three-way split, needed for
+        the same reason: a real ProBMoT model can legitimately declare a variable that no
+        instantiated process ever writes an equation for (e.g. the chosen structural variant
+        doesn't need it).
+
+        Also validates that every equation has actually been resolved (`Model.induce()` was
+        called) - a stray `Choose` this late means it wasn't.
+
+        Returns `(state_vars, algebraic_vars, frozen_values)`, where `frozen_values` maps a frozen
+        variable's `index_in_ctx` to the constant it should be held at.
+        """
+        all_vars = self.get_endo_variables()
+        state_vars = [var for var in all_vars if var.ode is not None]
+        algebraic_vars = [var for var in all_vars if var.ode is None and var.algebraic is not None]
+        frozen_vars = [var for var in all_vars if var.ode is None and var.algebraic is None]
+        for var in all_vars:
+            eq = var.ode if var.ode is not None else var.algebraic
+            if isinstance(eq, Choose):
+                raise ValueError(
+                    f"Variable {var.name} still has an unresolved Choose() equation. Call "
+                    "model.induce() to pick a concrete model before estimating."
+                )
+        frozen_values = {
+            var.index_in_ctx: (var.initial if var.initial is not None else 0.0) for var in frozen_vars
+        }
+        return state_vars, algebraic_vars, frozen_values
+
     def switch_engine(
         self, engine: Literal["scipy", "torch", "jax"], device: "torch.device | str | None" = None
     ) -> "InducedModel":
@@ -740,3 +772,105 @@ class InducedModel:
             f"InducedModel(Entities: {list(self.entities.values())}, "
             f"Vars: {list(self.vars.values())}, Consts: {list(self.consts.values())})"
         )
+
+
+# ---------------------------------------------------------------------------
+# torch RHS construction - moved here (from pybm.estimate.multishooting_torch) since every
+# estimator module needs to build the same right-hand side from an InducedModel's own state/
+# algebraic/frozen split, not just multishooting.
+# ---------------------------------------------------------------------------
+
+
+def _settle_algebraic(
+    algebraic_vars: "list[Var]", t: torch.Tensor, var_slots: "dict[int, torch.Tensor]", const_ctx: torch.Tensor
+) -> "dict[int, torch.Tensor]":
+    """
+    torch/autograd-friendly analogue of `pybm.simulate.predict._settle_algebraic`: fills in
+    `algebraic_vars`' values via repeated fixed-point passes, since one algebraic variable can
+    depend on another (e.g. `growthRate` depends on `tempGrowthLim`/`nutrientLim`/`lightLim`,
+    themselves algebraic) and `Var`/`Process` don't expose a dependency graph to sort by.
+
+    Always runs the full, fixed `len(algebraic_vars) + 1` passes (the proven-sufficient bound for
+    any acyclic dependency graph over that many variables) instead of stopping early once nothing
+    changes: this runs inside a batched, autograd-tracked forward pass, where a data-dependent
+    stopping condition would need a `.item()` call - breaking the graph - and would make different
+    rows of the batch take different numbers of passes, which torch has no clean way to express.
+
+    `var_slots` is a dict `index_in_ctx -> (N,) tensor` (see `_make_rhs`) - updated out-of-place
+    each pass (a fresh dict, not a mutated one) for the same reason `_make_rhs` builds its
+    `derivatives` out-of-place: staying friendly to autograd / torch.compile.
+    """
+    for _ in range(len(algebraic_vars) + 1):
+        ctx: Context = {"vars": var_slots, "consts": const_ctx}
+        var_slots = dict(var_slots)
+        for var in algebraic_vars:
+            var_slots[var.index_in_ctx] = var.algebraic(t, ctx)
+    return var_slots
+
+
+def _make_rhs(
+    state_vars: "list[Var]", algebraic_vars: "list[Var]", frozen_values: "dict[int, float]"
+) -> "Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]":
+    """
+    Builds the right-hand side f(t, y, const_ctx) every torch-based estimator integrates/evaluates
+    - only `state_vars` are actually integrated (`y`'s columns, in `state_vars` order);
+    `algebraic_vars` are re-derived from scratch at every call (`_settle_algebraic`) and
+    `frozen_values` are held constant, so that any state var's equation reading one of them (e.g.
+    growth reading a temperature-limitation factor) still sees a correct, current value.
+
+    Shapes (N = batch size, however the caller flattens it):
+        t         : (N,)
+        y         : (N, len(state_vars))
+        const_ctx : (N, n_consts)
+    Returns:
+        dy/dt     : (N, len(state_vars))
+
+    `ctx["vars"]` is a dict `index_in_ctx -> (N,) tensor` (see `_settle_algebraic`) rather than a
+    dense array - `Var.__call__` only ever does `ctx["vars"][self.index_in_ctx]`, which a dict
+    supports identically to an array/list, and a dict sidesteps having to know/pre-allocate the
+    model's full endogenous-variable count here.
+    """
+
+    def rhs(t: torch.Tensor, y: torch.Tensor, const_ctx_args: torch.Tensor) -> torch.Tensor:
+        const_ctx = const_ctx_args.T  # (n_consts, N) -> const_ctx[idx] has shape (N,)
+        batch_size = y.shape[0]
+
+        var_slots: "dict[int, torch.Tensor]" = {}
+        for i, var in enumerate(state_vars):
+            var_slots[var.index_in_ctx] = y[:, i]
+        for index, value in frozen_values.items():
+            var_slots[index] = torch.full((batch_size,), value, dtype=y.dtype, device=y.device)
+        # zero-valued placeholders for every algebraic slot, refined by _settle_algebraic below -
+        # without these, a first-pass read of an algebraic var that hasn't been computed yet (e.g.
+        # growthRate reading tempGrowthLim, both algebraic) would find no entry at all instead of
+        # a harmless 0.0 (see predict.py's dense, zero-initialized var_ctx for the same idea).
+        for var in algebraic_vars:
+            var_slots[var.index_in_ctx] = torch.zeros(batch_size, dtype=y.dtype, device=y.device)
+        var_slots = _settle_algebraic(algebraic_vars, t, var_slots, const_ctx)
+
+        ctx: Context = {"vars": var_slots, "consts": const_ctx}
+        # Build derivatives out-of-place (via stack, not in-place index_put)
+        # so we stay friendly to autograd / torch.compile.
+        derivatives: list[torch.Tensor] = [
+            torch.zeros(batch_size, dtype=y.dtype, device=y.device) for _ in state_vars
+        ]
+        for i, var in enumerate(state_vars):
+            derivatives[i] = var.ode(t, ctx)
+        return torch.stack(derivatives, dim=-1)  # (N, len(state_vars))
+
+    return rhs
+
+
+def _get_data_tensor(vars_: "list[Var]", t_eval: np.ndarray, device, dtype) -> torch.Tensor:
+    """Returns shape (n_vars, T). One-off setup cost, not part of the autograd graph."""
+    T = len(t_eval)
+    data = torch.zeros(len(vars_), T, dtype=dtype, device=device)
+    for i, var in enumerate(vars_):
+        if var.data is None:
+            raise ValueError(f"Variable {var.name} does not have data defined.")
+        for j, t in enumerate(t_eval):
+            value = var.data(t)
+            if value is None:
+                raise ValueError(f"Variable {var.name} returned no data at time {t}.")
+            data[i, j] = float(value)
+    return data

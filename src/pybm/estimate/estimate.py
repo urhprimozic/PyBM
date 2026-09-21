@@ -7,28 +7,25 @@ from typing import Any, Callable, Literal
 import numpy as np
 from scipy.optimize import least_squares
 
-from pybm.estimate.gradient_matching import estimate_gradient_matching, fit_gps
-from pybm.estimate.multishooting_torch import (
-    _build_subinterval_grid,
-    _make_solver,
-    _residuals,
-    _solve_segments,
-    _split_endo_vars,
-    uniform_sub_indices,
-)
+from pybm.estimate.gradient_matching import estimate as estimate_gradient_matching
+
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import Context, InducedModel, Model, Var
 from pybm.simulate.initials import get_ctx
 from pybm.simulate.trajectory import simulate as single_shooting
 
-recepies = Literal["gp", "gp+ms", "ms"]
+recepies = Literal["gp", "im", "gp+ms", "ms"]
 
 
-def _gp(model, t_eval, *args, **kwargs) -> ParamEstimationResults:
+def _gradient_matching(model, t_eval, *args, **kwargs) -> ParamEstimationResults:
     result = estimate_gradient_matching(model, t_eval, *args, **kwargs)
     return ParamEstimationResults(
         model=result.model, consts=result.consts, const_by_name=result.const_by_name
     )
+
+
+def _im(model, t_eval, *args, **kwargs) -> ParamEstimationResults:
+    raise NotImplementedError("Integral matching is not implemented yet.")
 
 
 def _gp_plus_ms(model, t_eval, *args, **kwargs):
@@ -99,7 +96,7 @@ def _singleshooting_loss(
     base_var_ctx = get_ctx(model, t=float(t_eval[0]))["vars"]
     x0 = np.array([base_var_ctx[var.index_in_ctx] for var in state_vars], dtype=float)
 
-    if verbose:
+    if verbose > 1:
         print(f"Integrating model with engine {method}..")
     if method == "scipy":
         return _singleshooting_loss_scipy(
@@ -164,7 +161,7 @@ def _singleshooting_loss_torch(
     device = torch.device(device) if device is not None else torch.device("cpu")
     dtype = torch.float64
 
-    _, algebraic_vars, frozen_values = _split_endo_vars(model)
+    _, algebraic_vars, frozen_values = model.split_endo_vars()
     solver = _make_solver(
         state_vars, algebraic_vars, frozen_values, atol=1e-8, rtol=1e-6
     )
@@ -192,7 +189,7 @@ def _singleshooting_loss_torch(
         traj_res, _, _ = _residuals(ys, initials, grid, data_t)
         return traj_res.sum()  # single candidate - sum == that candidate's own loss
 
-    for _ in tqdm(range(max_iter), desc="Single-shooting loss optimization", disable=verbose == 0):
+    for _ in tqdm(range(max_iter), desc="Single-shooting loss optimization", disable=verbose <= 1):
         optimizer.zero_grad()
         loss = loss_fn()
         loss.backward()
@@ -293,7 +290,7 @@ class FullEstimationResults:
             )
         device = device or torch.device("cpu")
         t_eval = np.asarray(t_eval, dtype=float)
-        state_vars, _, _ = _split_endo_vars(self.best_model)
+        state_vars, _, _ = self.best_model.split_endo_vars()
 
         sub_indices = uniform_sub_indices(t_eval, n_subintervals)
         seed_times = t_eval[sub_indices[:-1]]
@@ -408,7 +405,7 @@ def estimate_model(
     max_iter_loss : int = 100,
     verbose : int = 0,
     max_gp_iter: int = 100,
-    max_gp_points: int = 300,
+    max_gp_points: int = 500,
     ftol: float = 1e-4,
     xtol: float = 1e-4,
     gtol: float = 1e-4,
@@ -426,11 +423,18 @@ def estimate_model(
         The model to be estimated.
     recepie : str, optional
         The estimation method to be used. Can be
-            - "gp" for Gaussian Process
+            - "gp" for gradient matching (`pybm.estimate.gradient_matching`)
+            - "im" for integral matching (`pybm.estimate.integral_matching`) - same "never
+              simulate the ODE, always read a fixed GP interpolant" family as "gp", matching
+              windowed integrals instead of pointwise derivatives; see that module's docstring
+              for when it's worth trying over "gp" (short version: more robust to noise/local
+              overfitting on real data with a real overfitting risk, at the cost of a wider,
+              Grönwall-biased window on very nonlinear dynamics - not a strict upgrade).
             - "gp+ms" for Gaussian Process + Multishooting
             - "ms" for Multishooting.
 
-        Default is "gp".
+        Default is "gp". `decompose=True` is currently "gp"-only (see below) - not yet extended to
+        "im", even though the same per-block independence argument would apply to it too.
     decompose : bool, optional
         If true, delegates to `pybm.estimate.decompose.estimate_model_decomposed` instead of the
         brute-force search below: partitions the model's state variables into independent groups
@@ -467,12 +471,18 @@ def estimate_model(
         - with `parallel=True` and multiple GPU workers you don't want oversubscribing a single
         device, pick one device per run (or drive that split yourself, outside this function).
     max_gp_iter, max_gp_points : int, optional
-        Passed to `fit_gps` (recipe "gp" only) - see `pybm.estimate.gradient_matching.fit_gps`.
+        Passed to `fit_gps` (recipes "gp"/"im" only) - see
+        `pybm.estimate.gradient_matching.fit_gps`. `max_gp_points` default raised to `500` (from
+        `fit_gps`'s own historical `300`): GP hyperparameter fitting is O(n³) in points, and `300`
+        evenly-subsampled points meaningfully under-resolves lengthscale/noise on real, thousands-
+        of-rows data (checked directly on Bled: fitted lengthscale 17.9 at 300 points vs 11.3 at
+        800; `500` is the point on that curve still cheap enough not to dominate a full fit).
     ftol, xtol, gtol, max_nfev : optional
-        Recipe "gp" only - forwarded to `scipy.optimize.least_squares` for the constant fit (see
-        `pybm.estimate.gradient_matching.estimate_gradient_matching`). Loosen these to trade fit
-        accuracy for speed - this recipe is only a fast initializer to begin with (see that
-        module's docstring), so an approximate answer is often good enough.
+        Recipes "gp"/"im" only - forwarded to `scipy.optimize.least_squares` for the constant fit
+        (see `pybm.estimate.gradient_matching.estimate_gradient_matching` /
+        `pybm.estimate.integral_matching.estimate_integral_matching`). Loosen these to trade fit
+        accuracy for speed - both recipes are only a fast initializer to begin with, so an
+        approximate answer is often good enough.
     collocation_times : array-like, optional
         `decompose=True` only - forwarded to `estimate_gradient_matching` for every candidate; see
         that function's own `collocation_times` parameter. Defaults to `t_eval`. (The non-decomposed
@@ -499,6 +509,8 @@ def estimate_model(
     estimator: Callable[[Model, Any], ParamEstimationResults] | Any
     if recepie == "gp":
         estimator = _gp
+    elif recepie == "im":
+        estimator = _im
     elif recepie == "gp+ms":
         estimator = _gp_plus_ms
     elif recepie == "ms":
@@ -518,7 +530,10 @@ def estimate_model(
     # doesn't matter whether a given variable ends up state/algebraic/frozen in any specific
     # branch - an unused entry here is simply never looked up.
     gps = None
-    if recepie == "gp":
+    if recepie in ("gp", "im"):
+        # Step 1 of integral matching is the SAME GP fit gradient matching's own step 1 is (depends
+        # only on a variable's own observed data, never on structure) - share it here too, for the
+        # same reason.
         vars_with_data = {name: var for name, var in incomplete_model.vars.items() if var.data is not None}
         if vars_with_data:
             gps = fit_gps(vars_with_data, max_gp_points=max_gp_points, max_gp_iter=max_gp_iter, verbose=verbose)

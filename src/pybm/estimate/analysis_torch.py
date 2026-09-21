@@ -18,7 +18,6 @@ from pybm.estimate.multishooting_torch import (
     _build_subinterval_grid,
     _make_solver,
     _solve_segments,
-    _split_endo_vars,
     _stitch_trajectory,
     uniform_sub_indices,
 )
@@ -57,7 +56,7 @@ def simulate_multishooting(
             f"simulate_multishooting requires an InducedModel built with engine='torch', got engine={model.engine!r}."
         )
 
-    state_vars, algebraic_vars, frozen_values = _split_endo_vars(model)
+    state_vars, algebraic_vars, frozen_values = model.split_endo_vars()
     n_consts = len(model.consts)
     n_vars = len(state_vars)
     device = device or torch.device("cpu")
@@ -112,7 +111,7 @@ def simulate(model: InducedModel, t_eval, consts, initial=None, **kwargs):
     algebraic/frozen variables are re-derived/held fixed by the solver itself, see
     `simulate_multishooting`.
     """
-    state_vars, _, _ = _split_endo_vars(model)
+    state_vars, _, _ = model.split_endo_vars()
     t_eval = np.asarray(t_eval, dtype=float)
 
     if initial is None:
@@ -145,7 +144,7 @@ def MSE(model: InducedModel, t_eval, n_subintervals: int, consts, sub_indices: O
     Only compares DIFFERENTIAL ("state") variables - see `simulate_multishooting` - each of which
     must have `.data` set (raises via `var.data(t)` otherwise).
     """
-    state_vars, _, _ = _split_endo_vars(model)
+    state_vars, _, _ = model.split_endo_vars()
     t_eval = np.asarray(t_eval, dtype=float)
 
     if sub_indices is None:

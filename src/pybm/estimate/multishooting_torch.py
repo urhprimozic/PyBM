@@ -82,7 +82,7 @@ import torch
 import torchode as to
 from scipy.optimize import NonlinearConstraint, minimize
 
-from pybm.model import Choose, Const, Context, InducedModel, Var
+from pybm.model import Choose, Const, Context, InducedModel, Var, _get_data_tensor, _make_rhs
 
 
 # ---------------------------------------------------------------------------
@@ -90,121 +90,9 @@ from pybm.model import Choose, Const, Context, InducedModel, Var
 # ---------------------------------------------------------------------------
 
 
-def _split_endo_vars(model: InducedModel) -> "tuple[list[Var], list[Var], dict[int, float]]":
-    """
-    Splits `model`'s endogenous variables into differential ("state", actually integrated by
-    torchode), algebraic (re-derived at every RHS evaluation - see `_settle_algebraic`) and
-    "frozen" (neither an ODE nor an algebraic equation - held at their initial value for the
-    whole trajectory) - mirrors `pybm.simulate.predict.simulate`'s same three-way split, needed
-    here for the same reason: a real ProBMoT model can legitimately declare a variable that no
-    instantiated process ever writes an equation for (e.g. the chosen structural variant doesn't
-    need it).
-
-    Also validates that every equation has actually been resolved (`model.induce()` was called) -
-    a stray `Choose` this late means it wasn't.
-
-    Returns `(state_vars, algebraic_vars, frozen_values)`, where `frozen_values` maps a frozen
-    variable's `index_in_ctx` to the constant it should be held at.
-    """
-    all_vars = model.get_endo_variables()
-    state_vars = [var for var in all_vars if var.ode is not None]
-    algebraic_vars = [var for var in all_vars if var.ode is None and var.algebraic is not None]
-    frozen_vars = [var for var in all_vars if var.ode is None and var.algebraic is None]
-    for var in all_vars:
-        eq = var.ode if var.ode is not None else var.algebraic
-        if isinstance(eq, Choose):
-            raise ValueError(
-                f"Variable {var.name} still has an unresolved Choose() equation. Call "
-                "model.induce() to pick a concrete model before estimating."
-            )
-    frozen_values = {
-        var.index_in_ctx: (var.initial if var.initial is not None else 0.0) for var in frozen_vars
-    }
-    return state_vars, algebraic_vars, frozen_values
-
-
-def _settle_algebraic(
-    algebraic_vars: "list[Var]", t: torch.Tensor, var_slots: "dict[int, torch.Tensor]", const_ctx: torch.Tensor
-) -> "dict[int, torch.Tensor]":
-    """
-    torch/autograd-friendly analogue of `pybm.simulate.predict._settle_algebraic`: fills in
-    `algebraic_vars`' values via repeated fixed-point passes, since one algebraic variable can
-    depend on another (e.g. `growthRate` depends on `tempGrowthLim`/`nutrientLim`/`lightLim`,
-    themselves algebraic) and `Var`/`Process` don't expose a dependency graph to sort by.
-
-    Unlike `predict.py`'s version, this always runs the full, fixed `len(algebraic_vars) + 1`
-    passes (the same proven-sufficient bound for any acyclic dependency graph over that many
-    variables) instead of stopping early once nothing changes: this runs inside a batched,
-    autograd-tracked forward pass (and, for "weighted_sum", under a plain Python loop across
-    optimizer iterations too), where a data-dependent stopping condition would need a `.item()`
-    call - breaking the graph - and would make different rows of the batch take different numbers
-    of passes, which torch has no clean way to express. A fixed pass count sidesteps both.
-
-    `var_slots` is a dict `index_in_ctx -> (N,) tensor` (see `_make_rhs`) - updated out-of-place
-    each pass (a fresh dict, not a mutated one) for the same reason `_make_rhs` builds its
-    `derivatives` out-of-place: staying friendly to autograd / torch.compile.
-    """
-    for _ in range(len(algebraic_vars) + 1):
-        ctx: Context = {"vars": var_slots, "consts": const_ctx}
-        var_slots = dict(var_slots)
-        for var in algebraic_vars:
-            var_slots[var.index_in_ctx] = var.algebraic(t, ctx)
-    return var_slots
-
-
-def _make_rhs(
-    state_vars: "list[Var]", algebraic_vars: "list[Var]", frozen_values: "dict[int, float]"
-) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-    """
-    Builds the right-hand side f(t, y, const_ctx) that torchode integrates - only `state_vars`
-    are actually integrated (`y`'s columns, in `state_vars` order); `algebraic_vars` are re-
-    derived from scratch at every call (`_settle_algebraic`) and `frozen_values` are held
-    constant, so that any state var's equation reading one of them (e.g. growth reading a
-    temperature-limitation factor) still sees a correct, current value.
-
-    Shapes (N = mega-batch size = n_candidates * n_subintervals, flattened):
-        t         : (N,)
-        y         : (N, len(state_vars))
-        const_ctx : (N, n_consts)
-    Returns:
-        dy/dt     : (N, len(state_vars))
-
-    `ctx["vars"]` is a dict `index_in_ctx -> (N,) tensor` (see `_settle_algebraic`) rather than a
-    dense array - `Var.__call__` only ever does `ctx["vars"][self.index_in_ctx]`, which a dict
-    supports identically to an array/list, and a dict sidesteps having to know/pre-allocate the
-    model's full endogenous-variable count here. `const_ctx` is still transposed to (n_consts, N)
-    so `Const.__call__`'s `ctx["consts"][index]` gets back the right (N,) shape.
-    """
-
-    def rhs(t: torch.Tensor, y: torch.Tensor, const_ctx_args: torch.Tensor) -> torch.Tensor:
-        const_ctx = const_ctx_args.T  # (n_consts, N) -> const_ctx[idx] has shape (N,)
-        batch_size = y.shape[0]
-
-        var_slots: "dict[int, torch.Tensor]" = {}
-        for i, var in enumerate(state_vars):
-            var_slots[var.index_in_ctx] = y[:, i]
-        for index, value in frozen_values.items():
-            var_slots[index] = torch.full((batch_size,), value, dtype=y.dtype, device=y.device)
-        # zero-valued placeholders for every algebraic slot, refined by _settle_algebraic below -
-        # without these, a first-pass read of an algebraic var that hasn't been computed yet (e.g.
-        # growthRate reading tempGrowthLim, both algebraic) would find no entry at all instead of
-        # a harmless 0.0 (see predict.py's dense, zero-initialized var_ctx for the same idea).
-        for var in algebraic_vars:
-            var_slots[var.index_in_ctx] = torch.zeros(batch_size, dtype=y.dtype, device=y.device)
-        var_slots = _settle_algebraic(algebraic_vars, t, var_slots, const_ctx)
-
-        ctx: Context = {"vars": var_slots, "consts": const_ctx}
-        # Build derivatives out-of-place (via stack, not in-place index_put)
-        # so we stay friendly to autograd / torch.compile.
-        derivatives: list[torch.Tensor] = [
-            torch.zeros(batch_size, dtype=y.dtype, device=y.device) for _ in state_vars
-        ]
-        for i, var in enumerate(state_vars):
-            derivatives[i] = var.ode(t, ctx)
-        return torch.stack(derivatives, dim=-1)  # (N, len(state_vars))
-
-    return rhs
-
+# _split_endo_vars/_settle_algebraic/_make_rhs moved to pybm.model (as
+# InducedModel.split_endo_vars / _settle_algebraic / _make_rhs) - every torch-based estimator
+# needs them, not just multishooting.
 
 # A trial point that makes the ODE blow up doesn't come back as NaN from
 # torchode -- it comes back with a bad `Solution.status` and whatever
@@ -327,21 +215,6 @@ def _build_subinterval_grid(
     return _SubintervalGrid(sub_indices=sub_indices, lengths=lengths, max_len=max_len, t_grid=t_grid)
 
 
-def _get_data_tensor(vars_: list[Var], t_eval: np.ndarray, device, dtype) -> torch.Tensor:
-    """Returns shape (n_vars, T). One-off setup cost, not part of the autograd graph."""
-    T = len(t_eval)
-    data = torch.zeros(len(vars_), T, dtype=dtype, device=device)
-    for i, var in enumerate(vars_):
-        if var.data is None:
-            raise ValueError(f"Variable {var.name} does not have data defined.")
-        for j, t in enumerate(t_eval):
-            value = var.data(t)
-            if value is None:
-                raise ValueError(f"Variable {var.name} returned no data at time {t}.")
-            data[i, j] = float(value)
-    return data
-
-
 def _prepare_problem(
     model: InducedModel,
     t_eval: np.ndarray,
@@ -360,7 +233,7 @@ def _prepare_problem(
     frozen variables are handled internally by the solver's RHS (see `_make_rhs`,
     `_split_endo_vars`), never exposed as free/fitted quantities here.
     """
-    state_vars, algebraic_vars, frozen_values = _split_endo_vars(model)
+    state_vars, algebraic_vars, frozen_values = model.split_endo_vars()
     n_vars = len(state_vars)
     n_consts = len(model.consts)
 
@@ -424,10 +297,20 @@ def _residuals(
     initials: torch.Tensor,  # (B, K, n_vars)
     grid: _SubintervalGrid,
     data: torch.Tensor,  # (n_vars, T)
+    norm: Literal["l2", "l1"] = "l2",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Builds the batched loss ingredients, analogous to `residuals` and
     `smoothness_penalty` in the scipy version:
+
+    `norm="l1"` uses RAW `abs()` (not smoothed) - unlike `multishooting_adaptive._penalty`, nothing
+    downstream of this function ever takes a second derivative through it (`"constraints"`'s own
+    Jacobian is a single `torch.autograd.grad`, which handles `abs()`'s subgradient at zero exactly
+    fine), so there is no Hessian-degeneracy concern here to smooth away. Matches the classical l1
+    parameter-estimation formulation directly (Bock, Kostina & Schloder 2007, Sec. 3 - robust to
+    outliers, at the cost of losing differentiability of the SECOND derivative, which this module's
+    own `jacobian_mode="forward"` (needs exact second-order structure) does NOT support with
+    `norm="l1"` - see `_forward_sensitivity_traj_cont`, which is not threaded with `norm` at all.
 
     traj_res[b] : MEAN squared error (per time point, per variable)
                   between candidate b's stitched trajectory (segments
@@ -470,7 +353,8 @@ def _residuals(
             stitched[:, start + 1 : start + L, :] = seg[:, 1:, :]
 
     diff = stitched - data.T.unsqueeze(0)  # (1,T,n_vars) broadcast over B
-    traj_res = (diff**2).mean(dim=(1, 2))  # (B,)
+    penalty = (lambda d: d.abs()) if norm == "l1" else (lambda d: d**2)
+    traj_res = penalty(diff).mean(dim=(1, 2))  # (B,)
 
     if K > 1:
         cont_terms = []
@@ -478,7 +362,7 @@ def _residuals(
             L = grid.lengths[i]
             pred_end = ys[:, i, L - 1, :]  # (B, n_vars): end of segment i, propagated
             seed_next = initials[:, i + 1, :]  # (B, n_vars): free var seeding segment i+1
-            cont_terms.append(((pred_end - seed_next) ** 2).mean(dim=-1))  # (B,), mean over n_vars
+            cont_terms.append(penalty(pred_end - seed_next).mean(dim=-1))  # (B,), mean over n_vars
         cont_per_segment = torch.stack(cont_terms, dim=1)  # (B, K-1)
         cont_res = cont_per_segment.mean(dim=1)  # (B,), mean over gaps too
     else:
@@ -539,7 +423,7 @@ def _sample_initial_params(
       un-jittered initial guess).
     """
     rng = np.random.default_rng(seed)
-    vars_, _, _ = _split_endo_vars(model)
+    vars_, _, _ = model.split_endo_vars()
     consts = list(model.consts.values())
     n_consts = len(consts)
     n_vars = len(vars_)
@@ -575,6 +459,139 @@ def _sample_initial_params(
         initials[:, i, :] = torch.as_tensor(base_vals[None, :] + noise, dtype=dtype)
 
     return torch.cat([const_ctx, initials.reshape(n_candidates, -1)], dim=1)
+
+
+# ---------------------------------------------------------------------------
+# Forward-sensitivity Jacobian ("constraints"-only `jacobian_mode="forward"`) - an alternative to
+# the default `jacobian_mode="adjoint"` (torch.autograd.grad through torchode's AutoDiffAdjoint,
+# used everywhere else in this module). See the chat this followed / notes for the derivation:
+#
+#   traj_res, cont_res are scalar reductions of the segment endpoints/trajectories; their gradient
+#   w.r.t. the full parameter vector [theta, s_0,...,s_{K-1}] needs, for each output point,
+#   dx/dtheta =: Psi and dx/ds_k =: Phi (the parameter- and initial-condition-sensitivity matrices,
+#   solving the standard variational equations dPsi/dt = (dF/dx)Psi + dF/dtheta, Psi(t_k)=0, and
+#   dPhi/dt = (dF/dx)Phi, Phi(t_k)=I). Augmenting the ODE state with (flattened) Phi and Psi and
+#   integrating them ALONGSIDE x gives both at every output point from ONE forward solve - no
+#   backprop through the solver at all (sidesteps the double-backprop-through-torchode's-adjoint
+#   limitation found empirically for batched multi-segment solves - see multishooting_adaptive.py).
+#
+#   Classical tradeoff (Cao, Li, Petzold & Serban 2003; Aydogmus & Tor 2020, arXiv:2006.15740, do
+#   exactly this swap for multiple shooting): forward sensitivity's cost scales with the number of
+#   PARAMETERS (n_consts here is small, a handful to a few dozen); adjoint/backprop's cost is
+#   independent of parameter count but here only ever differentiates an already-reduced SCALAR, so
+#   the classical "adjoint wins when there are many parameters and few outputs" argument doesn't
+#   clearly favor either for THIS module's existing (already-scalar) objective/constraint - the
+#   practical payoff of "forward" here is robustness (no adjoint-through-batched-solve limitation)
+#   and independence from `torch.autograd`, not raw speed.
+# ---------------------------------------------------------------------------
+
+
+def _make_forward_sensitivity_rhs(
+    state_vars: list[Var], algebraic_vars: list[Var], frozen_values: "dict[int, float]", n_consts: int,
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    """
+    Augments the model's own RHS with the variational (sensitivity) equations. The augmented state
+    per sample is `z = [x (n,), Phi.flatten() (n*n,), Psi.flatten() (n*p,)]`, `n = len(state_vars)`,
+    `p = n_consts`. `torch.func.jacrev` gives `dF/dx` (n,n) and `dF/dtheta` (n,p) at each point from
+    one local (non-ODE, non-batched) function call - cheap since `n`/`p` are small in every system
+    this codebase fits (at most a handful of states, a few dozen constants) - then `vmap` batches
+    this over the mega-batch dimension `_solve_segments` already uses.
+    """
+    base_rhs = _make_rhs(state_vars, algebraic_vars, frozen_values)
+    n = len(state_vars)
+    p = n_consts
+
+    def f_single(t_i: torch.Tensor, x_i: torch.Tensor, c_i: torch.Tensor) -> torch.Tensor:
+        return base_rhs(t_i.reshape(1), x_i.reshape(1, n), c_i.reshape(1, p)).reshape(n)
+
+    def per_sample(t_i, x_i, c_i, Phi_i, Psi_i):
+        dFdx, dFdc = torch.func.jacrev(f_single, argnums=(1, 2))(t_i, x_i, c_i)  # (n,n), (n,p)
+        dx = f_single(t_i, x_i, c_i)
+        return dx, dFdx @ Phi_i, dFdx @ Psi_i + dFdc
+
+    vmapped = torch.func.vmap(per_sample)
+
+    def rhs(t: torch.Tensor, z: torch.Tensor, const_ctx: torch.Tensor) -> torch.Tensor:
+        N = z.shape[0]
+        x = z[:, :n]
+        Phi = z[:, n : n + n * n].reshape(N, n, n)
+        Psi = z[:, n + n * n :].reshape(N, n, p)
+        dx, dPhi, dPsi = vmapped(t, x, const_ctx, Phi, Psi)
+        return torch.cat([dx, dPhi.reshape(N, n * n), dPsi.reshape(N, n * p)], dim=1)
+
+    return rhs
+
+
+def _make_forward_sensitivity_solver(
+    state_vars: list[Var], algebraic_vars: list[Var], frozen_values: "dict[int, float]", n_consts: int,
+    atol: float, rtol: float, max_steps: "int | None", dt_min: "float | None",
+) -> to.AutoDiffAdjoint:
+    rhs = _make_forward_sensitivity_rhs(state_vars, algebraic_vars, frozen_values, n_consts)
+    term = to.ODETerm(rhs, with_args=True)  # type: ignore[arg-type]
+    step_method = to.Dopri5(term=term)
+    step_size_controller = to.IntegralController(atol=atol, rtol=rtol, term=term, dt_min=dt_min)
+    return to.AutoDiffAdjoint(step_method, step_size_controller, max_steps=max_steps)  # type: ignore[arg-type]
+
+
+def _forward_sensitivity_traj_cont(
+    aug_solver: to.AutoDiffAdjoint,
+    vars_: list[Var],
+    grid: _SubintervalGrid,
+    data: torch.Tensor,  # (n_vars, T)
+    const_ctx: torch.Tensor,  # (1, n_consts)
+    initials: torch.Tensor,  # (1, K, n_vars)
+    n_consts: int,
+    n_vars: int,
+) -> "tuple[float, float, np.ndarray, np.ndarray]":
+    """
+    Single-candidate (B=1) value+gradient of `traj_res`/`cont_res` w.r.t. the flat
+    `[theta, s_0,...,s_{K-1}]` vector, via forward sensitivity - no `torch.autograd` at all. Returns
+    `(traj_res, cont_res, grad_traj, grad_cont)`, `grad_*` flat numpy arrays matching `_residuals`'
+    own reduction (mean over the same points/gaps), for direct use as `scipy.optimize.minimize`/
+    `NonlinearConstraint`'s `jac`.
+    """
+    n, p = n_vars, n_consts
+    K = initials.shape[1]
+    dtype, device = initials.dtype, initials.device
+
+    eye = torch.eye(n, dtype=dtype, device=device).reshape(1, 1, n * n).expand(1, K, n * n)
+    zeros_psi = torch.zeros(1, K, n * p, dtype=dtype, device=device)
+    initials_aug = torch.cat([initials, eye, zeros_psi], dim=-1)
+
+    ys_aug = _solve_segments(vars_, const_ctx, initials_aug, grid, aug_solver)  # (1,K,max_len,n+n*n+n*p)
+    x = ys_aug[..., :n]
+    Phi = ys_aug[..., n : n + n * n].reshape(1, K, -1, n, n)
+    Psi = ys_aug[..., n + n * n :].reshape(1, K, -1, n, p)
+
+    traj_res, cont_res, _ = _residuals(x, initials, grid, data)
+
+    T = data.shape[1]
+    M = T * n
+    grad_theta_traj = torch.zeros(p, dtype=dtype, device=device)
+    grad_s_traj = torch.zeros(K, n, dtype=dtype, device=device)
+    for i in range(K):
+        L = grid.lengths[i]
+        start = int(grid.sub_indices[i])
+        idx_local = slice(0, L) if i == 0 else slice(1, L)
+        idx_global = slice(start, start + L) if i == 0 else slice(start + 1, start + L)
+        diff = x[0, i, idx_local, :] - data[:, idx_global].T  # (L', n)
+        grad_theta_traj += (2.0 / M) * torch.einsum("jd,jdp->p", diff, Psi[0, i, idx_local, :, :])
+        grad_s_traj[i] += (2.0 / M) * torch.einsum("jd,jde->e", diff, Phi[0, i, idx_local, :, :])
+
+    grad_theta_cont = torch.zeros(p, dtype=dtype, device=device)
+    grad_s_cont = torch.zeros(K, n, dtype=dtype, device=device)
+    if K > 1:
+        Mc = (K - 1) * n
+        for i in range(K - 1):
+            L = grid.lengths[i]
+            e = x[0, i, L - 1, :] - initials[0, i + 1, :]  # (n,)
+            grad_theta_cont += (2.0 / Mc) * (e @ Psi[0, i, L - 1, :, :])
+            grad_s_cont[i] += (2.0 / Mc) * (e @ Phi[0, i, L - 1, :, :])
+            grad_s_cont[i + 1] += (2.0 / Mc) * (-e)
+
+    grad_traj = torch.cat([grad_theta_traj, grad_s_traj.reshape(-1)]).detach().cpu().numpy()
+    grad_cont = torch.cat([grad_theta_cont, grad_s_cont.reshape(-1)]).detach().cpu().numpy()
+    return float(traj_res.item()), float(cont_res.item()), grad_traj, grad_cont
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +678,9 @@ def _estimate_constraints_single(
     gtol: float,
     verbose: int,
     patience: int = 10,
+    jacobian_mode: Literal["adjoint", "forward"] = "adjoint",
+    aug_solver: "to.AutoDiffAdjoint | None" = None,
+    norm: Literal["l2", "l1"] = "l2",
 ):
     """
     One trust-constr run for a single candidate. Objective, constraint,
@@ -669,8 +689,14 @@ def _estimate_constraints_single(
     here is just K, not K*n_candidates, since scipy drives one candidate
     at a time), reused via `_ForwardCache` when trust-constr asks for
     several of {value, jac} at the same x.
+
+    `jacobian_mode="forward"` (needs `aug_solver`, see `_make_forward_sensitivity_solver`) replaces
+    BOTH `torch.autograd.grad` calls below with one call to `_forward_sensitivity_traj_cont` -
+    see that function's own module-level comment block for the method and its tradeoffs. It does
+    NOT support `norm="l1"` (its gradient-assembly formulas are hardcoded for L2) - asserted below.
     """
     cache = _ForwardCache()
+    fwd_cache: "dict | None" = None  # single-slot cache for jacobian_mode="forward", keyed by bytes
 
     def unpack(params_t: torch.Tensor):
         const_ctx = params_t[:n_consts].unsqueeze(0)  # (1, n_consts)
@@ -687,29 +713,58 @@ def _estimate_constraints_single(
             params_t.requires_grad_(True)
             const_ctx, initials = unpack(params_t)
             ys = _solve_segments(vars_, const_ctx, initials, grid, solver)
-            traj_res, cont_res, _ = _residuals(ys, initials, grid, data)
+            traj_res, cont_res, _ = _residuals(ys, initials, grid, data, norm)
         else:
             with torch.no_grad():
                 const_ctx, initials = unpack(params_t)
                 ys = _solve_segments(vars_, const_ctx, initials, grid, solver)
-                traj_res, cont_res, _ = _residuals(ys, initials, grid, data)
+                traj_res, cont_res, _ = _residuals(ys, initials, grid, data, norm)
 
         cache.set(params_np, params_t, traj_res[0], cont_res[0], need_grad)
         return params_t, traj_res[0], cont_res[0]
 
-    def objective(params_np: np.ndarray):
-        params_t, traj_res, _ = forward(params_np, need_grad=True)
-        (grad,) = torch.autograd.grad(traj_res, params_t, retain_graph=True)
-        return traj_res.item(), grad.detach().cpu().numpy()
+    def forward_sensitivity(params_np: np.ndarray) -> "tuple[float, float, np.ndarray, np.ndarray]":
+        nonlocal fwd_cache
+        if fwd_cache is not None and fwd_cache["key"] == params_np.tobytes():
+            return fwd_cache["value"]
+        params_t = torch.as_tensor(params_np, dtype=dtype)
+        const_ctx, initials = unpack(params_t)
+        value = _forward_sensitivity_traj_cont(
+            aug_solver, vars_, grid, data, const_ctx, initials, n_consts, n_vars,
+        )
+        fwd_cache = {"key": params_np.tobytes(), "value": value}
+        return value
 
-    def constraint_fun(params_np: np.ndarray):
-        _, _, cont_res = forward(params_np, need_grad=False)
-        return np.array([cont_res.item()])
+    if jacobian_mode == "forward":
+        assert aug_solver is not None
+        assert norm == "l2", "jacobian_mode='forward' does not support norm='l1' (see docstring)"
 
-    def constraint_jac(params_np: np.ndarray):
-        params_t, _, cont_res = forward(params_np, need_grad=True)
-        (grad,) = torch.autograd.grad(cont_res, params_t, retain_graph=True)
-        return grad.detach().cpu().numpy().reshape(1, -1)
+        def objective(params_np: np.ndarray):
+            traj_res, _, grad_traj, _ = forward_sensitivity(params_np)
+            return traj_res, grad_traj
+
+        def constraint_fun(params_np: np.ndarray):
+            _, cont_res, _, _ = forward_sensitivity(params_np)
+            return np.array([cont_res])
+
+        def constraint_jac(params_np: np.ndarray):
+            _, _, _, grad_cont = forward_sensitivity(params_np)
+            return grad_cont.reshape(1, -1)
+    else:
+
+        def objective(params_np: np.ndarray):
+            params_t, traj_res, _ = forward(params_np, need_grad=True)
+            (grad,) = torch.autograd.grad(traj_res, params_t, retain_graph=True)
+            return traj_res.item(), grad.detach().cpu().numpy()
+
+        def constraint_fun(params_np: np.ndarray):
+            _, _, cont_res = forward(params_np, need_grad=False)
+            return np.array([cont_res.item()])
+
+        def constraint_jac(params_np: np.ndarray):
+            params_t, _, cont_res = forward(params_np, need_grad=True)
+            (grad,) = torch.autograd.grad(cont_res, params_t, retain_graph=True)
+            return grad.detach().cpu().numpy().reshape(1, -1)
 
     # With a single segment (n_subintervals == 1, plain single-shooting) there is no continuity
     # gap to enforce at all - `_residuals` returns `cont_res = torch.zeros(...)` as a literal
@@ -750,6 +805,8 @@ def _estimate_constraints(
     solver_max_steps: Optional[int] = 2000,
     solver_dt_min: Optional[float] = None,
     patience: int = 10,
+    jacobian_mode: Literal["adjoint", "forward"] = "adjoint",
+    norm: Literal["l2", "l1"] = "l2",
 ) -> ConstraintsResult:
     vars_, n_vars, n_consts, grid, data, solver = _prepare_problem(
         model, t_eval, n_subintervals, device, dtype, solver_atol, solver_rtol,
@@ -760,10 +817,19 @@ def _estimate_constraints(
 
     init_np = init_params_batch.detach().cpu().numpy()
 
+    aug_solver = None
+    if jacobian_mode == "forward":
+        _, algebraic_vars, frozen_values = model.split_endo_vars()
+        aug_solver = _make_forward_sensitivity_solver(
+            vars_, algebraic_vars, frozen_values, n_consts,
+            solver_atol, solver_rtol, solver_max_steps, solver_dt_min,
+        )
+
     def run_one(b: int):
         return _estimate_constraints_single(
             vars_, grid, data, solver, init_np[b], n_consts, n_subintervals, n_vars,
             dtype, maxiter, gtol, verbose, patience=patience,
+            jacobian_mode=jacobian_mode, aug_solver=aug_solver, norm=norm,
         )
 
     if executor is None:
@@ -786,7 +852,7 @@ def _estimate_constraints(
     initials = params_t[n_consts:].reshape(1, n_subintervals, n_vars)
     with torch.no_grad():
         ys = _solve_segments(vars_, const_ctx, initials, grid, solver)
-        _, cont_res_t, cont_per_segment_t = _residuals(ys, initials, grid, data)
+        _, cont_res_t, cont_per_segment_t = _residuals(ys, initials, grid, data, norm)
 
     return ConstraintsResult(
         consts=best.x[:n_consts],
@@ -992,6 +1058,8 @@ def estimate_torch(
     # -- "constraints"-only knobs --
     executor=None,
     patience: int = 10,
+    jacobian_mode: Literal["adjoint", "forward"] = "adjoint",
+    norm: Literal["l2", "l1"] = "l2",
     # -- "weighted_sum"-only knobs --
     optimizer_name: Literal["adam", "lbfgs"] = "adam",
     lr: float = 1e-2,
@@ -1055,6 +1123,20 @@ def estimate_torch(
         keep churning to `max_iter`. This stops it once the objective
         hasn't improved by more than `gtol` (relative) over the last
         `patience` iterations (see `_make_plateau_callback`).
+    norm : "l2" | "l1", optional
+        "constraints"-only (see `_residuals`'s own docstring). Per-element penalty used in both
+        the trajectory-fit and continuity-matching residuals. "l1" uses RAW `abs()`, not smoothed -
+        safe here since only first-order `torch.autograd.grad` is ever taken through it. NOT
+        supported together with `jacobian_mode="forward"` (raises).
+    jacobian_mode : "adjoint" | "forward", optional
+        "constraints"-only. "adjoint" (default): `torch.autograd.grad` through torchode's
+        `AutoDiffAdjoint`, as before. "forward": forward-sensitivity - augments the ODE with the
+        variational equations (Phi=dx/ds_k, Psi=dx/dtheta) and reads the objective/constraint
+        gradients off them directly, no backprop through the solver at all - see
+        `_forward_sensitivity_traj_cont`'s own module-level comment block for the method, the
+        classical forward-vs-adjoint tradeoff, and why "forward" sidesteps a real limitation found
+        in torchode's own adjoint (double backprop returns NaN for a batched multi-segment solve -
+        see `multishooting_adaptive.py`).
     solver_max_steps : int, optional
         Caps a single forward/adjoint-backward integration. An unstable
         trial point during optimizer search (e.g. trust-constr probing
@@ -1115,7 +1197,7 @@ def estimate_torch(
             model, t_eval, n_subintervals, init_params, device, dtype,
             solver_atol, solver_rtol, max_iter, gtol, verbose, executor=executor,
             sub_indices=sub_indices, solver_max_steps=solver_max_steps, solver_dt_min=solver_dt_min,
-            patience=patience,
+            patience=patience, jacobian_mode=jacobian_mode, norm=norm,
         )
     elif method == "weighted_sum":
         return _estimate_weighted_sum(

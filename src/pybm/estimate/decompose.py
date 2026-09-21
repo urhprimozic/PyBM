@@ -33,7 +33,7 @@ import numpy as np
 from tqdm import tqdm
 
 from pybm.estimate.estimate import FullEstimationResults, _singleshooting_loss
-from pybm.estimate.gradient_matching import estimate_gradient_matching, fit_gps
+from pybm.estimate.depr.gradient_matching import estimate_gradient_matching, fit_gps
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Model
 from pybm.model_graph import Block, build_blocks
