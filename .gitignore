@@ -1,4 +1,5 @@
 # data
+examples/*
 data/
 src/pybm/benchmark/
 # CMA-ES files
