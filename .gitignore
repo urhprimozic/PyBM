@@ -1,6 +1,6 @@
 # data
 data/
-src/pybm/benchmark
+src/pybm/benchmark/
 # CMA-ES files
 outcmaes/
 
