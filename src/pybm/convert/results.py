@@ -20,7 +20,7 @@ import numpy as np
 from tqdm.asyncio import tqdm
 
 from pybm.convert.probmot import Library, ModelBuilder, parse
-from pybm.estimate.estimate import FullEstimationResults
+from pybm.estimate.depr.estimate import FullEstimationResults
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel
 

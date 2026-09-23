@@ -39,13 +39,13 @@ from pybm.estimate.depr.gradient_matching import (
     estimate_gradient_matching,
     fit_gps,
 )
-from pybm.estimate.multishooting_adaptive import (
+from pybm.estimate.depr.multishooting_adaptive import (
     _L1_SMOOTH_EPS,
     _block_loss,
     _seed_at,
     _state_weights,
 )
-from pybm.estimate.multishooting_torch import _homotopy_weight, _make_solver
+from pybm.estimate.depr.multishooting_torch import _homotopy_weight, _make_solver
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Var, _get_data_tensor
 

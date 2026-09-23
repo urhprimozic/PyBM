@@ -50,8 +50,8 @@ from pybm.estimate.depr.gradient_matching import (
     estimate_gradient_matching,
     fit_gps,
 )
-from pybm.estimate.multishooting_adaptive import _seed_at, _state_weights
-from pybm.estimate.multishooting_torch import (
+from pybm.estimate.depr.multishooting_adaptive import _seed_at, _state_weights
+from pybm.estimate.depr.multishooting_torch import (
     _build_subinterval_grid,
     _homotopy_weight,
     _solve_segments,

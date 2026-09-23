@@ -114,9 +114,9 @@ from pybm.estimate.depr.gradient_matching import (
     estimate_gradient_matching,
     fit_gps,
 )
-from pybm.estimate.integral_matching import _build_windows, _guard_rhs, _simpson_nodes_weights
-from pybm.estimate.multishooting_adaptive import _L1_SMOOTH_EPS, _penalty
-from pybm.estimate.multishooting_torch import _homotopy_weight
+from pybm.estimate.depr.integral_matching import _build_windows, _guard_rhs, _simpson_nodes_weights
+from pybm.estimate.depr.multishooting_adaptive import _L1_SMOOTH_EPS, _penalty
+from pybm.estimate.depr.multishooting_torch import _homotopy_weight
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, _get_data_tensor, _make_rhs
 

@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from pybm.estimate.multishooting_torch import (
+from pybm.estimate.depr.multishooting_torch import (
     _build_subinterval_grid,
     _make_solver,
     _solve_segments,

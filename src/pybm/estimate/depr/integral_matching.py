@@ -74,7 +74,7 @@ from pybm.estimate.depr.gradient_matching import (
     fit_gps,
 )
 from pybm.estimate.gradient_matching import _const_bounds, _initial_const_guess
-from pybm.estimate.multishooting_torch import uniform_sub_indices
+from pybm.estimate.depr.multishooting_torch import uniform_sub_indices
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Var, _make_rhs
 

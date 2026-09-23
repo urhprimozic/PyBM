@@ -62,7 +62,7 @@ from pybm.estimate.depr.gradient_matching import (
     _rbf_kernel,
     fit_gps,
 )
-from pybm.estimate.integral_matching import _build_windows
+from pybm.estimate.depr.integral_matching import _build_windows
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Var, _make_rhs
 

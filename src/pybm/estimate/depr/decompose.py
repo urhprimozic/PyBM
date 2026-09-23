@@ -32,7 +32,7 @@ from typing import Literal
 import numpy as np
 from tqdm import tqdm
 
-from pybm.estimate.estimate import FullEstimationResults, _singleshooting_loss
+from pybm.estimate.depr.estimate import FullEstimationResults, _singleshooting_loss
 from pybm.estimate.depr.gradient_matching import estimate_gradient_matching, fit_gps
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Model

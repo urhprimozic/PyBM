@@ -61,7 +61,7 @@ from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.optimize import least_squares, minimize as scipy_minimize
 from torch.func import jacfwd
 
-from pybm.estimate.multishooting_torch import uniform_sub_indices
+from pybm.estimate.depr.multishooting_torch import uniform_sub_indices
 from pybm.model import _make_rhs
 from pybm.estimate.results import ParamEstimationResults
 from pybm.model import InducedModel, Var
