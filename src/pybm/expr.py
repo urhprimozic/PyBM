@@ -17,6 +17,7 @@ combining expressions works at any time, but *evaluating* one requires a complet
 
 from __future__ import annotations
 
+import functools
 import operator
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -136,7 +137,9 @@ class MaxExpr(Expr):
     operands: list[Expr]
 
     def __call__(self, t, ctx):
-        return max(operand(t, ctx) for operand in self.operands)
+        from pybm.func import _dispatched_binary  # func imports expr
+
+        return functools.reduce(_dispatched_binary("maximum"), (operand(t, ctx) for operand in self.operands))
 
     def __repr__(self):
         return f"max({', '.join(repr(o) for o in self.operands)})"
@@ -149,7 +152,9 @@ class MinExpr(Expr):
     operands: list[Expr]
 
     def __call__(self, t, ctx):
-        return min(operand(t, ctx) for operand in self.operands)
+        from pybm.func import _dispatched_binary  # func imports expr
+
+        return functools.reduce(_dispatched_binary("minimum"), (operand(t, ctx) for operand in self.operands))
 
     def __repr__(self):
         return f"min({', '.join(repr(o) for o in self.operands)})"

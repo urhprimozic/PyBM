@@ -5,13 +5,16 @@ from tqdm import tqdm
 
 from odestimate.gp.regressor import GP
 from pybm.estimate.gradient_matching import gradient_matching
+from pybm.estimate.multishooting import multishooting
+from pybm.estimate.magi import magi
+from pybm.estimate.collocation import collocation
 from pybm.model import InducedModel, _get_data_tensor
 
 
 def _check_shared_state_vars(models: "list[InducedModel]") -> None:
     """
     Every candidate must have the SAME state variables, in the SAME order, to safely share one GP
-    across all of them (see `_fit_shared_gp`'s own docstring for why this is normally true across
+    across all of them (see `fit_shared_gp`'s own docstring for why this is normally true across
     a structural search - state/algebraic/exogenous ROLE is a property of the entity/variable
     declaration itself, only the RHS *equation* choice varies). Raises with a specific message
     naming which candidate differs, rather than silently misaligning one candidate's state vector
@@ -33,10 +36,10 @@ def _check_shared_state_vars(models: "list[InducedModel]") -> None:
             )
 
 
-def _fit_shared_gp(model: InducedModel, t_eval, n_points: int, device: "torch.device | None" = None) -> GP:
+def fit_shared_gp(model: InducedModel, t_eval,  device: "torch.device | None" = None, **kwargs) -> GP:
     """
     Fits ONE `odestimate` GP, shared across every candidate that has the SAME state variables (in
-    the same order) as `model` - hoisted OUT of `estimate_models`' own loop, because gradient
+    the same order) as `model` - hoisted OUT of `estimate_models_gradient_matching`' own loop, because gradient
     matching's interpolant never depends on which candidate RHS is chosen, only on each state
     variable's own observed data (see the chat this followed).
 
@@ -47,14 +50,12 @@ def _fit_shared_gp(model: InducedModel, t_eval, n_points: int, device: "torch.de
     Cholesky factorization over the FULL `t_eval`, as the dominant cost).
     """
     device = device or torch.device("cpu")
-    model.switch_engine("torch", device=device)
+    model.engine = "torch"
     t_eval = np.asarray(t_eval, dtype=float)
     state_vars, _, _ = model.split_endo_vars()
 
-    idx = np.linspace(0, len(t_eval) - 1, min(n_points, len(t_eval))).astype(int)
-    t_sub = t_eval[idx]
-    x_obs = _get_data_tensor(state_vars, t_sub, device, torch.float64).cpu().numpy()  # (n_vars, n_points)
-    return GP(t_sub, x_obs)
+    x_obs = _get_data_tensor(state_vars, t_eval, device, torch.float64).cpu().numpy()  # (n_vars, n_points)
+    return GP(t_eval, x_obs, **kwargs)
 
 
 def _prune_by_trust_region(results: list) -> list:
@@ -68,11 +69,47 @@ def _prune_by_trust_region(results: list) -> list:
     best_upper = min(r.interval[1] for r in results)
     return [r for r in results if r.interval[0] <= best_upper]
 
+def estimate_models_multishooting(models, t_eval, n_subintervals, **kwargs):
+    """
+    Estimate every candidate in `models` by multiple shooting (`pybm.estimate.multishooting.
+    multishooting`), each on its own - unlike gradient matching there is no interpolant to share.
+    **kwargs are forwarded to `multishooting` (engine, integration settings, minimizer_kwargs, ...).
+    """
+    results = []
+    for model in tqdm(models, desc="Estimating models", total=len(models)):
+        results.append(multishooting(model, t_eval, n_subintervals, **kwargs))
+    best_result = min(results, key=lambda r: r.cost)
+    return {"best_result": best_result, "all_results": results}
 
-def estimate_models(models, t_eval, n_samples, gp: GP, **kwargs):
+
+def estimate_models_magi(models, t_eval, **kwargs):
+    """
+    Estimate every candidate in `models` with MAGI (`pybm.estimate.magi.magi`), each on its own.
+    **kwargs are forwarded to `magi` (method, grid, kernel, init_integration, minimizer_kwargs, ...).
+    """
+    results = []
+    for model in tqdm(models, desc="Estimating models", total=len(models)):
+        results.append(magi(model, t_eval, **kwargs))
+    best_result = min(results, key=lambda r: r.cost)
+    return {"best_result": best_result, "all_results": results}
+
+
+def estimate_models_collocation(models, t_eval, **kwargs):
+    """
+    Estimate every candidate in `models` by collocation (`pybm.estimate.collocation.collocation`),
+    each on its own. **kwargs are forwarded to `collocation` (n_seeds, ode_points, options, ...).
+    """
+    results = []
+    for model in tqdm(models, desc="Estimating models", total=len(models)):
+        results.append(collocation(model, t_eval, **kwargs))
+    best_result = min(results, key=lambda r: r.cost)
+    return {"best_result": best_result, "all_results": results}
+
+
+def estimate_models_gradient_matching(models, t_eval, n_samples, gp: GP, **kwargs):
     """
     Estimate every candidate in `models` using gradient matching against the SAME, already-fit
-    `gp` (see `_fit_shared_gp`) - only the per-candidate right-hand side changes; the interpolant
+    `gp` (see `fit_shared_gp`) - only the per-candidate right-hand side changes; the interpolant
     doesn't.
     """
     results = []
@@ -89,7 +126,7 @@ def two_step_estimation(incomplete_model, t_eval, n_samples_1, n_samples_2, **kw
 
     Step 1 (cheap screen): fit ONE shared GP on only `n_samples_1` (evenly-subsampled) points - a
     small `n_samples_1` keeps the GP FIT ITSELF cheap, not just the later least-squares step (see
-    `_fit_shared_gp`). Run gradient matching + a `uniform_trust_region` confidence interval for
+    `fit_shared_gp`). Run gradient matching + a `uniform_trust_region` confidence interval for
     every candidate against that SAME shared interpolant, then drop every candidate whose
     best-case loss is still provably worse than the best ACHIEVED worst-case (`_prune_by_trust_
     region`) - a safe (conservative) elimination, not a heuristic cutoff.
@@ -105,7 +142,7 @@ def two_step_estimation(incomplete_model, t_eval, n_samples_1, n_samples_2, **kw
         The full observed time grid.
     n_samples_1, n_samples_2 : int
         Point budgets for step 1 (cheap screen, e.g. 50-100) and step 2 (precise re-fit, larger) -
-        each used for BOTH the shared GP's own fit (subsampled from `t_eval`, `_fit_shared_gp`)
+        each used for BOTH the shared GP's own fit (subsampled from `t_eval`, `fit_shared_gp`)
         and `uniform_trust_region`'s own randomly-sampled test points at that stage.
     **kwargs :
         Forwarded to `gradient_matching` (and from there to `uniform_trust_region`, e.g.
@@ -122,14 +159,14 @@ def two_step_estimation(incomplete_model, t_eval, n_samples_1, n_samples_2, **kw
     _check_shared_state_vars(models)
 
     # Step 1: cheap screen, against a cheap (few-point) shared interpolant.
-    gp_1 = _fit_shared_gp(models[0], t_eval, n_samples_1)
-    step1 = estimate_models(models, t_eval, n_samples_1, gp_1, **kwargs)
+    gp_1 = fit_shared_gp(models[0], t_eval, n_samples_1)
+    step1 = estimate_models_gradient_matching(models, t_eval, n_samples_1, gp_1, **kwargs)
     survivors = _prune_by_trust_region(step1["all_results"])
 
     # Step 2: precise re-fit, against a more precise shared interpolant - survivors only.
     survivor_models = [r.model for r in survivors]
-    gp_2 = _fit_shared_gp(survivor_models[0], t_eval, n_samples_2)
-    step2 = estimate_models(survivor_models, t_eval, n_samples_2, gp_2, **kwargs)
+    gp_2 = fit_shared_gp(survivor_models[0], t_eval, n_samples_2)
+    step2 = estimate_models_gradient_matching(survivor_models, t_eval, n_samples_2, gp_2, **kwargs)
 
     return {
         "best_result": step2["best_result"],

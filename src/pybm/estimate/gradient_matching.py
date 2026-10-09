@@ -2,35 +2,93 @@ import numpy as np
 import torch
 from odestimate.gp.regressor import GP
 from odestimate.gradient_matching import uniform_trust_region
+from pybm.model import InducedModel, _get_data_tensor, _make_observation, _make_rhs, _make_rhs_numpy
+from pybm.model_graph import collect_leaves
+from pybm.estimate.preprocess import _const_bounds, _initial_const_guess, _used_const_indices
 
-from pybm.model import InducedModel, _get_data_tensor, _make_rhs
 
 
-def _const_bounds(model: InducedModel) -> tuple[np.ndarray, np.ndarray]:
-    lo = np.full(len(model.consts), -np.inf)
-    hi = np.full(len(model.consts), np.inf)
-    for const in model.consts.values():
-        if const.range is not None:
-            lo[const.index_in_ctx] = const.range[0]
-            hi[const.index_in_ctx] = const.range[1]
-    return lo, hi
-def _initial_const_guess(model: InducedModel) -> np.ndarray:
+def build_problem(model: InducedModel, engine: str = "torch"):
     """
-    Starting guess for the constant fit: `initial_value` where known, otherwise the midpoint of
-    `range` (falling back to 0.0 only when neither is available). A blanket 0.0 default (as
-    `int_scipy.get_initial_const_ctx` uses) can land a constant that appears as a divisor in some
-    equation (e.g. a `refTemp`) at exactly zero, which makes the very first residual evaluation
-    NaN/inf - `least_squares` refuses to even start from a point like that.
+    Turns a candidate into the `(f, theta0, bounds)` that `odestimate.gradient_matching`'s
+    `gradient_matching`/`confidence_interval` take - over only the constants that actually appear
+    in this candidate's equations. The model declares every constant of every library process (on
+    Bled: 16, of which a candidate uses 4-7); the rest have an identically zero Jacobian column, so
+    fitting them only costs Jacobian time and conditioning.
+
+    Parameters
+    ----------
+    model : InducedModel
+        Its data must already be in `engine`'s format (`model.switch_engine`).
+    engine : "torch" or "scipy"
+        Build `f` from torch (`_make_rhs`) or numpy (`_make_rhs_numpy`) operations.
+
+    Returns
+    -------
+    f : callable
+        `f(x, t, theta) -> dx/dt`, `x` shape `(n, n_state_vars)`, `theta` the free constants only.
+        For engine="scipy", `theta` may also be `(n, n_free)`: one parameter vector per row.
+    theta0 : np.ndarray
+        Initial guess for the free constants (clipped into their bounds).
+    bounds : tuple[np.ndarray, np.ndarray]
+        `(lo, hi)` for the free constants - pass to `least_squares` as `bounds=`.
+    free_idx : np.ndarray
+        `theta[k]` is the constant with `index_in_ctx == free_idx[k]`. Every other constant is
+        held at its initial guess (it doesn't enter any equation, so its value is irrelevant).
     """
-    c0 = np.zeros(len(model.consts), dtype=float)
-    for const in model.consts.values():
-        if const.initial_value is not None:
-            c0[const.index_in_ctx] = const.initial_value
-        elif const.range is not None and np.isfinite(const.range[0]) and np.isfinite(const.range[1]):
-            c0[const.index_in_ctx] = 0.5 * (const.range[0] + const.range[1])
-        else:
-            c0[const.index_in_ctx] = 0.0
-    return c0
+    state_vars, algebraic_vars, frozen_values = model.split_endo_vars()
+    free_idx, full0, lo, hi = _free_consts(model)
+    if engine == "scipy":
+        f = _with_free_consts(_make_rhs_numpy(state_vars, algebraic_vars, frozen_values), engine, free_idx, full0)
+    else:
+        f = _with_free_consts(_make_rhs(state_vars, algebraic_vars, frozen_values), engine, free_idx, full0)
+    return f, full0[free_idx], (lo[free_idx], hi[free_idx]), free_idx
+
+
+def build_observation(model: InducedModel, var_names: "list[str]", engine: str = "torch"):
+    """
+    `observe(x, t, theta) -> (n, len(var_names))`: the values of the endogenous variables
+    `var_names` (state or algebraic) at states x, over the same free constants as `build_problem`'s
+    `f` (same `theta` order, same shapes). For estimators that compare observed variables which
+    aren't states, e.g. a flow computed from the water stored in the states.
+    """
+    state_vars, algebraic_vars, frozen_values = model.split_endo_vars()
+    free_idx, full0, _, _ = _free_consts(model)
+    observe = _make_observation(state_vars, algebraic_vars, frozen_values, [model.vars[n] for n in var_names])
+    return _with_free_consts(observe, engine, free_idx, full0)
+
+
+def _free_consts(model: InducedModel):
+    """(free_idx, full0, lo, hi): the constants the equations use, and every constant's initial
+    guess (clipped into its bounds) and bounds."""
+    state_vars, algebraic_vars, _ = model.split_endo_vars()
+    lo, hi = _const_bounds(model)
+    return _used_const_indices(state_vars + algebraic_vars), np.clip(_initial_const_guess(model), lo, hi), lo, hi
+
+
+def _with_free_consts(g, engine: str, free_idx: np.ndarray, full0: np.ndarray):
+    """Turns g(t, y, consts) over every constant into fun(x, t, theta) over the free ones only;
+    the others stay at full0."""
+    if engine == "scipy":
+        def fun(x, t, theta):
+            theta = np.asarray(theta, dtype=float)
+            if theta.ndim == 2:  # one parameter vector per row: each const reads as an (m,) array
+                consts = np.repeat(full0[:, None], len(theta), axis=1)
+                consts[free_idx] = theta.T
+            else:
+                consts = full0.copy()
+                consts[free_idx] = theta
+            return g(t, x, consts)
+        return fun
+
+    base = torch.as_tensor(full0, dtype=torch.float64)
+    index = torch.as_tensor(free_idx)
+
+    def fun(x, t, theta):
+        consts = base.index_put((index,), theta)  # out-of-place, autodiff-friendly
+        return g(t, x, consts.unsqueeze(0).expand(x.shape[0], -1))
+    return fun
+
 
 def gradient_matching(model: InducedModel, t_eval, gp: "GP | None" = None, device: "torch.device | None" = None, **kwargs):
     """

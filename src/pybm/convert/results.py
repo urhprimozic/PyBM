@@ -106,7 +106,7 @@ def load_probmot_results(models_out_path: str, library: Library) -> FullEstimati
     ----
     Exogenous variables' `data` is NOT attached here (ProBMoT's own dataset paths in the `// Model
     #N for dataset ...` header aren't resolved to a pybm `TimeSeries`) - attach it the same way as
-    any other converted model, e.g. `result.best_model.vars["phyto.conc"].data = TimeSeries(...)`,
+    any other converted model, e.g. `result.best_model.vars["phyto.conc"].data = LinearInterpolation(...)`,
     before simulating.
     """
     text = open(models_out_path).read()

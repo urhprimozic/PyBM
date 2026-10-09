@@ -72,12 +72,19 @@ def _dispatched_math(name: str) -> Callable[[Any], Any]:
 
 
 def _apply_dispatched_binary(name: str, torch_name: str, a: Any, b: Any) -> Any:
-    """Same idea as `_apply_dispatched_math`, for `_dispatched_binary`."""
+    """Same idea as `_apply_dispatched_math`, for `_dispatched_binary`. The engine comes from
+    whichever argument is an array/tensor, so `max(0, x)` works as well as `max(x, 0)`."""
     engine = infer_engine(a)
+    if engine == "scipy":
+        engine = infer_engine(b)
     if engine == "jax":
         import jax.numpy as jnp
         return getattr(jnp, name)(a, b)
     if engine == "torch":
+        # torch.maximum/minimum take no plain-number operand; as_tensor keeps an existing tensor as is
+        ref = a if torch.is_tensor(a) else b
+        a = torch.as_tensor(a, dtype=ref.dtype, device=ref.device)
+        b = torch.as_tensor(b, dtype=ref.dtype, device=ref.device)
         return getattr(torch, torch_name)(a, b)
     return getattr(np, name)(a, b)
 
@@ -99,12 +106,64 @@ def _make_unary_math(name: str) -> "Callable[[Expr | float], FuncExpr]":
     return make_expr
 
 
+def _make_binary_math(name: str) -> "Callable[[Expr | float, Expr | float], FuncExpr]":
+    """Two-argument analogue of `_make_unary_math`, e.g. `maximum(0, x)`."""
+    func = _dispatched_binary(name)
+
+    def make_expr(a: "Expr | float", b: "Expr | float") -> FuncExpr:
+        return FuncExpr(func, [wrap(a), wrap(b)], name=name)
+
+    return make_expr
+
+
 exp = _make_unary_math("exp")
 sin = _make_unary_math("sin")
 cos = _make_unary_math("cos")
 tan = _make_unary_math("tan")
 arcsin = _make_unary_math("arcsin")
 tanh = _make_unary_math("tanh")
+# element-wise, unlike Python's builtin max/min
+maximum = _make_binary_math("maximum")
+minimum = _make_binary_math("minimum")
+
+
+def _apply_relaxed(kind: Literal["max", "min"], eps: float, method: str, a: Any, b: Any) -> Any:
+    """max(a, b) = If(a - b)(b).Else(a) and min(a, b) = If(a - b)(a).Else(b), relaxed like `If`.
+    Module-level, so that the `functools.partial` over it stays picklable (see
+    `_apply_dispatched_math`)."""
+    d = a - b
+    relaxed = RelaxedIfElse(eps=eps, method=method, engine=infer_engine(d))
+    return relaxed.If(d, b if kind == "max" else a).Else(a if kind == "max" else b)
+
+
+def _relaxed(kind: Literal["max", "min"], operands, eps: float, method: str) -> Expr:
+    func = functools.partial(_apply_relaxed, kind, eps, method)
+    return functools.reduce(lambda a, b: FuncExpr(func, [a, b], name=f"relaxed_{kind}"), [wrap(o) for o in operands])
+
+
+def RelaxedMax(*operands: "Expr | float", eps: float = 0.01, method: str = "tanh") -> Expr:
+    """
+    Smooth element-wise max, `max(a, b) = If(a - b)(b).Else(a)`: the switch from b to a is spread
+    over a width ~eps around a = b (see `RelaxedIfElse`). Smooth everywhere, so the derivatives
+    of an equation with it are continuous (a plain max has a kink, where a gradient-based fit sees
+    a wrong one-sided derivative). Exact at a = b, within exp(-2 |a - b| / eps) of max(a, b) away
+    from it, at most 0.14 eps below it in between (method="tanh"). More than two operands: pairwise
+    from the left.
+
+    Parameters
+    ----------
+    *operands : Expr or float
+    eps : float
+        Width of the switch, in the operands' units.
+    method : str
+        "tanh", "erf" or "linear", see `RelaxedIfElse`.
+    """
+    return _relaxed("max", operands, eps, method)
+
+
+def RelaxedMin(*operands: "Expr | float", eps: float = 0.01, method: str = "tanh") -> Expr:
+    """Smooth element-wise min, `min(a, b) = If(a - b)(a).Else(b)`; see `RelaxedMax`."""
+    return _relaxed("min", operands, eps, method)
 
 
 # ============================================================ lazy relaxed if/elif/.../else ====

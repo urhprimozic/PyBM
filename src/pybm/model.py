@@ -36,6 +36,7 @@ from itertools import product
 from typing import Any, Callable, Literal, TypedDict
 
 import numpy as np
+from odestimate.gp.regressor import GP, GP1dim
 import torch
 
 from pybm.expr import Expr, MaxExpr, MinExpr, Num, wrap
@@ -53,7 +54,8 @@ class Context(TypedDict):
 
 
 class TimeSeries:
-    """Time-indexed data for an exogenous variable, with linear interpolation between samples.
+    """Time-indexed data for an exogenous variables.
+     Boilerplate class for different methods of interpolations. 
     """
 
     def __init__(self, t: np.ndarray | Any, x: np.ndarray | Any):
@@ -98,7 +100,10 @@ class TimeSeries:
             self.t, self.x = self.t.detach().cpu().numpy(), self.x.detach().cpu().numpy()
         self.t = np.asarray(self.t)
         self.x = np.asarray(self.x)
-
+    def __call__(self, t,*args: Any, **kwds: Any) -> Any:
+        raise NotImplementedError("TimeSeries is a boilerplate class and has no implementation of interpolation. Please use GaussianProcessInterpolation, LinearInterpolation, ...")
+   
+class LinearInterpolation(TimeSeries):
     def interpolate(self, index, t):
         """Interpolates the value of the variable at the given index."""
         # out of bounds --> return the closest value
@@ -150,6 +155,90 @@ class TimeSeries:
                 elif t > self.t[self.index + 1]:
                     return self.bisect(t, self.index + 1, len(self.t) - 1)
 
+class GaussianProcessInterpolation(TimeSeries):
+    """
+    TimeSeries with gaussian process interpolation. 
+    """
+    def __init__(self, t: np.ndarray[tuple[Any, ...], np.dtype[Any]] | Any, x: np.ndarray[tuple[Any, ...], np.dtype[Any]] | Any, gp : GP1dim | None = None, **kwargs):
+        """
+        Creates a TimeSeries with gaussian process interpolation.
+
+        Parameters
+        ----------
+        t : array-like
+            time points
+        x : array-like
+            data points
+        gp : GP1dim | None, optional
+            if provided, this trained gp will be used. Otherwise, new is trained.
+        """
+
+        super().__init__(t, x)
+        if gp is None:
+            # train GP on the data
+            gp = GP1dim(t, x, **kwargs)
+        self.gp = gp
+        self._cached_t: "np.ndarray | None" = None
+        self._cached_x: "np.ndarray | None" = None
+        self._cached_tensor_t: "torch.Tensor | None" = None
+        self._cached_tensor_x: "torch.Tensor | None" = None
+
+    def __call__(self, t, *args: Any, **kwds: Any) -> Any:
+        """
+        GP posterior mean at `t`, returned in the same kind as `t`: a torch tensor on `t`'s
+        device, a jax array, a numpy array, or a float for a scalar `t` - so equations can mix it
+        with the other operands freely, like `LinearInterpolation`'s output.
+
+        The last query is cached: estimators evaluate the right-hand side on the same time grid
+        over and over (and every induced candidate shares this object), so a repeated grid skips
+        the GP prediction entirely.
+        """
+        if torch.is_tensor(t):
+            return self._call_torch(t)
+
+        t_np = np.asarray(t, dtype=float)
+        if self._cached_t is None or self._cached_t.shape != t_np.shape or not np.array_equal(self._cached_t, t_np):
+            self._cached_x = np.asarray(self.gp(t_np.reshape(-1)), dtype=float).reshape(t_np.shape)
+            self._cached_t = t_np.copy()
+        x = self._cached_x
+
+        if type(t).__module__.startswith("jax"):
+            import jax.numpy as jnp
+            return jnp.asarray(x)
+        return float(x) if x.ndim == 0 else x.copy()
+
+    def _call_torch(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        The GP mean computed in torch rather than through sklearn: inside a torch.func transform
+        (jacrev/vmap, as gradient matching's Jacobian uses) no tensor may be read as numpy, not
+        even a captured one that doesn't depend on the differentiated input. Only the RBF kernel
+        is supported here: k(t, X) = signal_var * exp(-(t - X)^2 / (2 length_scale^2)).
+
+        Cached by identity, since values can't be compared inside a transform either: estimators
+        pass the same time tensor on every call. Mutating that tensor in place between calls
+        would return a stale value.
+        """
+        if t is self._cached_tensor_t:
+            return self._cached_tensor_x
+        from odestimate.gp.kernels import RBFWithNoise
+
+        gpr = self.gp.gpr
+        kernel = gpr.kernel_
+        if not isinstance(kernel, RBFWithNoise):
+            raise NotImplementedError(
+                f"GaussianProcessInterpolation with torch inputs supports only RBFWithNoise kernels, got {kernel!r}."
+            )
+        dtype = t.dtype if t.is_floating_point() else torch.float64
+        as_t = lambda a: torch.as_tensor(np.asarray(a, dtype=float), dtype=dtype, device=t.device)
+        x_train, alpha = as_t(gpr.X_train_.ravel()), as_t(gpr.alpha_.ravel())
+        diff = t.to(dtype).unsqueeze(-1) - x_train
+        k = kernel.signal_var * torch.exp(-0.5 * (diff / kernel.length_scale) ** 2)
+        y_std = float(np.ravel(getattr(gpr, "_y_train_std", 1.0))[0])
+        y_mean = float(np.ravel(getattr(gpr, "_y_train_mean", 0.0))[0])
+        x = (k @ alpha) * y_std + y_mean
+
+        self._cached_tensor_t, self._cached_tensor_x = t, x
+        return x
 
 @dataclass
 class Var(Expr):
@@ -213,8 +302,8 @@ class Var(Expr):
         return ctx["vars"][self.index_in_ctx]
 
     def set_data(self, t, x):
-        """Sets the data backing an exogenous variable."""
-        self.data = TimeSeries(t, x)
+        """Sets the data backing an exogenous variable (linearly interpolated)."""
+        self.data = LinearInterpolation(t, x)
 
     def __str__(self):
         return self.name
@@ -698,6 +787,19 @@ class InducedModel:
         """Returns every endogenous variable in the model."""
         return [var for var in self.vars.values() if var.type == "endo"]
 
+    def equations(self, labels: "dict[str, str] | None" = None) -> str:
+        """LaTeX of this model's equations, constants as symbols - see `pybm.latex.equations`."""
+        from pybm.latex import equations  # pybm.latex imports this module
+
+        return equations(self, labels)
+
+    def equations_estimated(self, consts, labels: "dict[str, str] | None" = None, round: int = 2) -> str:
+        """LaTeX of this model's equations with estimated constants - see
+        `pybm.latex.equations_estimated`."""
+        from pybm.latex import equations_estimated  # pybm.latex imports this module
+
+        return equations_estimated(self, consts, labels, round)
+
     def split_endo_vars(self) -> "tuple[list[Var], list[Var], dict[int, float]]":
         """
         Splits this model's endogenous variables into differential ("state", actually integrated),
@@ -782,30 +884,122 @@ class InducedModel:
 
 
 def _settle_algebraic(
-    algebraic_vars: "list[Var]", t: torch.Tensor, var_slots: "dict[int, torch.Tensor]", const_ctx: torch.Tensor
+    algebraic_vars: "list[Var]", t: torch.Tensor, var_slots: "dict[int, torch.Tensor]", const_ctx: torch.Tensor,
+    in_order: bool = False,
 ) -> "dict[int, torch.Tensor]":
     """
     torch/autograd-friendly analogue of `pybm.simulate.predict._settle_algebraic`: fills in
     `algebraic_vars`' values via repeated fixed-point passes, since one algebraic variable can
     depend on another (e.g. `growthRate` depends on `tempGrowthLim`/`nutrientLim`/`lightLim`,
-    themselves algebraic) and `Var`/`Process` don't expose a dependency graph to sort by.
+    themselves algebraic).
 
-    Always runs the full, fixed `len(algebraic_vars) + 1` passes (the proven-sufficient bound for
-    any acyclic dependency graph over that many variables) instead of stopping early once nothing
-    changes: this runs inside a batched, autograd-tracked forward pass, where a data-dependent
-    stopping condition would need a `.item()` call - breaking the graph - and would make different
-    rows of the batch take different numbers of passes, which torch has no clean way to express.
+    Runs `len(algebraic_vars) + 1` passes, each reading only the previous pass's values - the
+    proven-sufficient bound for any acyclic dependency graph over that many variables, in any
+    order. Always that fixed number instead of stopping early once nothing changes: this runs inside
+    a batched, autograd-tracked forward pass, where a data-dependent stopping condition would need a
+    `.item()` call - breaking the graph - and would make different rows of the batch take different
+    numbers of passes, which torch has no clean way to express.
 
-    `var_slots` is a dict `index_in_ctx -> (N,) tensor` (see `_make_rhs`) - updated out-of-place
-    each pass (a fresh dict, not a mutated one) for the same reason `_make_rhs` builds its
+    `in_order=True`: `algebraic_vars` are in dependency order (see `_settle_plan`), so a single pass
+    in which each variable already reads the values computed before it in the same pass gives the
+    same result.
+
+    `var_slots` is a dict `index_in_ctx -> (N,) tensor` (see `_make_rhs`) - the caller's dict is
+    never mutated, a fresh one is returned - for the same reason `_make_rhs` builds its
     `derivatives` out-of-place: staying friendly to autograd / torch.compile.
     """
-    for _ in range(len(algebraic_vars) + 1):
+    if in_order:
+        var_slots = dict(var_slots)
         ctx: Context = {"vars": var_slots, "consts": const_ctx}
+        for var in algebraic_vars:
+            var_slots[var.index_in_ctx] = var.algebraic(t, ctx)
+        return var_slots
+    for _ in range(len(algebraic_vars) + 1):
+        ctx = {"vars": var_slots, "consts": const_ctx}
         var_slots = dict(var_slots)
         for var in algebraic_vars:
             var_slots[var.index_in_ctx] = var.algebraic(t, ctx)
     return var_slots
+
+
+def _algebraic_order(algebraic_vars: "list[Var]") -> "list[Var] | None":
+    """
+    `algebraic_vars` sorted so that every variable comes after the algebraic variables its
+    equation reads, or None if they depend on each other in a cycle. In this order one pass of
+    `_settle_algebraic(in_order=True)` gives the fixed point exactly, instead of
+    `len(algebraic_vars) + 1` passes.
+    """
+    from pybm.model_graph import collect_leaves  # model_graph imports model
+
+    by_id = {id(var): var for var in algebraic_vars}
+    reads = {id(var): set(collect_leaves(var.algebraic)[0]) & by_id.keys() for var in algebraic_vars}
+    order, done = [], set()
+    while len(order) < len(algebraic_vars):
+        ready = [var for var in algebraic_vars if id(var) not in done and reads[id(var)] <= done]
+        if not ready:
+            return None
+        order += ready
+        done |= {id(var) for var in ready}
+    return order
+
+
+def _settle_plan(algebraic_vars: "list[Var]") -> "tuple[list[Var], bool]":
+    """(variables, in_order) for `_settle_algebraic`: one pass in dependency order when there is one."""
+    order = _algebraic_order(algebraic_vars)
+    return (algebraic_vars, False) if order is None else (order, True)
+
+
+def _make_slots(
+    state_vars: "list[Var]", algebraic_vars: "list[Var]", frozen_values: "dict[int, float]"
+) -> "Callable[[Any, Any, Any], dict[int, Any]]":
+    """
+    Builds slots(t, y, const_ctx) -> {index_in_ctx: (N,) values} of every endogenous variable:
+    state variables from `y`'s columns (in `state_vars` order), frozen ones held at their value,
+    algebraic ones derived from those (`_settle_algebraic`). torch or numpy, after `y`'s type;
+    `const_ctx[idx]` must give constant idx (an (N,) row or a scalar).
+    """
+    settle_vars, in_order = _settle_plan(algebraic_vars)
+
+    def slots(t, y, const_ctx):
+        batch_size = y.shape[0]
+        if torch.is_tensor(y):
+            full = lambda value: torch.full((batch_size,), value, dtype=y.dtype, device=y.device)
+        else:
+            full = lambda value: np.full(batch_size, value, dtype=float)
+        var_slots = {var.index_in_ctx: y[:, i] for i, var in enumerate(state_vars)}
+        for index, value in frozen_values.items():
+            var_slots[index] = full(value)
+        # zero-valued placeholders for every algebraic slot, refined by _settle_algebraic below -
+        # without these, a first-pass read of an algebraic var that hasn't been computed yet (e.g.
+        # growthRate reading tempGrowthLim, both algebraic) would find no entry at all instead of
+        # a harmless 0.0 (see predict.py's dense, zero-initialized var_ctx for the same idea).
+        for var in algebraic_vars:
+            var_slots[var.index_in_ctx] = full(0.0)
+        return _settle_algebraic(settle_vars, t, var_slots, const_ctx, in_order=in_order)
+
+    return slots
+
+
+def _make_observation(
+    state_vars: "list[Var]", algebraic_vars: "list[Var]", frozen_values: "dict[int, float]",
+    observed_vars: "list[Var]",
+) -> "Callable[[Any, Any, Any], Any]":
+    """
+    Builds observe(t, y, const_ctx) -> (N, len(observed_vars)): the values of `observed_vars` (any
+    endogenous variables - state, algebraic or frozen) at states `y`. Same shapes and conventions
+    as `_make_rhs` (torch) and `_make_rhs_numpy` (numpy), by the type of `y`.
+    """
+    slots = _make_slots(state_vars, algebraic_vars, frozen_values)
+
+    def observe(t, y, const_ctx):
+        if torch.is_tensor(y):
+            const_ctx = const_ctx.T  # (N, n_consts) -> rows per constant, as in _make_rhs
+            values = slots(t, y, const_ctx)
+            return torch.stack([torch.broadcast_to(values[v.index_in_ctx], (y.shape[0],)) for v in observed_vars], dim=-1)
+        values = slots(t, y, const_ctx)
+        return np.stack([np.broadcast_to(values[v.index_in_ctx], (y.shape[0],)) for v in observed_vars], axis=-1)
+
+    return observe
 
 
 def _make_rhs(
@@ -831,24 +1025,12 @@ def _make_rhs(
     model's full endogenous-variable count here.
     """
 
+    slots = _make_slots(state_vars, algebraic_vars, frozen_values)
+
     def rhs(t: torch.Tensor, y: torch.Tensor, const_ctx_args: torch.Tensor) -> torch.Tensor:
         const_ctx = const_ctx_args.T  # (n_consts, N) -> const_ctx[idx] has shape (N,)
         batch_size = y.shape[0]
-
-        var_slots: "dict[int, torch.Tensor]" = {}
-        for i, var in enumerate(state_vars):
-            var_slots[var.index_in_ctx] = y[:, i]
-        for index, value in frozen_values.items():
-            var_slots[index] = torch.full((batch_size,), value, dtype=y.dtype, device=y.device)
-        # zero-valued placeholders for every algebraic slot, refined by _settle_algebraic below -
-        # without these, a first-pass read of an algebraic var that hasn't been computed yet (e.g.
-        # growthRate reading tempGrowthLim, both algebraic) would find no entry at all instead of
-        # a harmless 0.0 (see predict.py's dense, zero-initialized var_ctx for the same idea).
-        for var in algebraic_vars:
-            var_slots[var.index_in_ctx] = torch.zeros(batch_size, dtype=y.dtype, device=y.device)
-        var_slots = _settle_algebraic(algebraic_vars, t, var_slots, const_ctx)
-
-        ctx: Context = {"vars": var_slots, "consts": const_ctx}
+        ctx: Context = {"vars": slots(t, y, const_ctx), "consts": const_ctx}
         # Build derivatives out-of-place (via stack, not in-place index_put)
         # so we stay friendly to autograd / torch.compile.
         derivatives: list[torch.Tensor] = [
@@ -857,6 +1039,26 @@ def _make_rhs(
         for i, var in enumerate(state_vars):
             derivatives[i] = var.ode(t, ctx)
         return torch.stack(derivatives, dim=-1)  # (N, len(state_vars))
+
+    return rhs
+
+
+def _make_rhs_numpy(
+    state_vars: "list[Var]", algebraic_vars: "list[Var]", frozen_values: "dict[int, float]"
+) -> "Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]":
+    """
+    numpy twin of `_make_rhs`, for estimators that run without torch. Same shapes, except
+    `consts` is the plain `(n_consts,)` vector: every Const read is then a scalar that broadcasts
+    against the `(N,)` state columns, so no `(N, n_consts)` context is ever built.
+    """
+
+    slots = _make_slots(state_vars, algebraic_vars, frozen_values)
+
+    def rhs(t: np.ndarray, y: np.ndarray, consts: np.ndarray) -> np.ndarray:
+        batch_size = y.shape[0]
+        ctx: Context = {"vars": slots(t, y, consts), "consts": consts}
+        # broadcast_to: an equation that happens not to depend on any (N,)-shaped input comes out a scalar
+        return np.stack([np.broadcast_to(var.ode(t, ctx), (batch_size,)) for var in state_vars], axis=-1)
 
     return rhs
 
