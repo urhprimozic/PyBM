@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from odestimate.latent.collocation import collocation as _collocation
+from odestimate.matching import collocation as _collocation
 
 from pybm.estimate.gradient_matching import build_observation, build_problem
 from pybm.estimate.preprocess import _const_bounds, _initial_const_guess
@@ -12,7 +12,7 @@ def collocation(model: InducedModel, t_eval, theta_0=None, unobserved_inits=None
                 **kwargs):
     """
     Estimate a candidate's constants by collocation - a thin PyBM-side adapter around
-    `odestimate.latent.collocation.collocation`, which does the actual work. Turns the
+    `odestimate.matching.collocation`, which does the actual work. Turns the
     `InducedModel` into what `collocation` takes:
 
     - the data of every endogenous variable that has data, read at `t_eval`. If all of them are

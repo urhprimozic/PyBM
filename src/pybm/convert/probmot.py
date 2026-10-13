@@ -653,10 +653,10 @@ def _build_entity(library: Library, spec: EntityInstanceSpec) -> Entity:
             aggregation=vs.attrs.get("aggregation", "sum"), unit=vs.attrs.get("unit"),
         ))
     for cs in const_specs:
-        inst_attrs = spec.consts.get(cs.name, {})
-        parts.append(Const(
-            cs.name, initial_value=inst_attrs.get("value"),
-            range=cs.attrs.get("range"), unit=cs.attrs.get("unit"),
+        value = spec.consts.get(cs.name, {}).get("value")
+        parts.append(Const(  # a value in the .pbm fixes the constant (range (v, v)); null leaves it to the fit
+            cs.name, initial_value=value, range=cs.attrs.get("range") if value is None else (value, value),
+            unit=cs.attrs.get("unit"),
         ))
     return Entity(*parts, name=spec.name)
 
@@ -799,15 +799,21 @@ class ModelBuilder:
         const_specs = self.library.process_consts(template_name)
 
         def fresh_consts() -> "dict[str, Const]":
-            return {
+            values = {cs.name: consts_override.get(cs.name, {}).get("value") for cs in const_specs}
+            return {  # a value in the .pbm fixes the constant (range (v, v)); null leaves it to the fit
                 cs.name: Const(
-                    cs.name, initial_value=consts_override.get(cs.name, {}).get("value"),
-                    range=cs.attrs.get("range"), unit=cs.attrs.get("unit"),
+                    cs.name, initial_value=values[cs.name],
+                    range=cs.attrs.get("range") if values[cs.name] is None else (values[cs.name], values[cs.name]),
+                    unit=cs.attrs.get("unit"),
                 )
                 for cs in const_specs
             }
 
         slots = self._collect_slots(template_name, role_bindings)
+        if sub_process_overrides == [] and slots:
+            # the .pbm instance lists no sub-processes (e.g. `process mortality(phyto, env) : MortalityPP {}`)
+            # for a template that has some: they are open, as for an anonymous reference
+            sub_process_overrides = None
 
         if sub_process_overrides is not None:
             assert len(slots) == len(sub_process_overrides), (

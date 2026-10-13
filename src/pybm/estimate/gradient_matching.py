@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from odestimate.gp.regressor import GP
-from odestimate.gradient_matching import gradient_matching as _gradient_matching
 from odestimate.gradient_matching import uniform_trust_region
 from pybm.model import InducedModel, _get_data_tensor, _make_observation, _make_rhs, _make_rhs_numpy
 from pybm.model_graph import collect_leaves
@@ -60,11 +59,13 @@ def build_observation(model: InducedModel, var_names: "list[str]", engine: str =
 
 
 def _free_consts(model: InducedModel):
-    """(free_idx, full0, lo, hi): the constants the equations use, and every constant's initial
+    """(free_idx, full0, lo, hi): the constants the equations use and that are not fixed (a range
+    (v, v) fixes a constant at v, e.g. a value given in a ProBMoT .pbm), and every constant's initial
     guess (clipped into its bounds) and bounds."""
     state_vars, algebraic_vars, _ = model.split_endo_vars()
     lo, hi = _const_bounds(model)
-    return _used_const_indices(state_vars + algebraic_vars), np.clip(_initial_const_guess(model), lo, hi), lo, hi
+    used = _used_const_indices(state_vars + algebraic_vars)
+    return used[lo[used] < hi[used]], np.clip(_initial_const_guess(model), lo, hi), lo, hi
 
 
 def _with_free_consts(g, engine: str, free_idx: np.ndarray, full0: np.ndarray):
@@ -91,15 +92,15 @@ def _with_free_consts(g, engine: str, free_idx: np.ndarray, full0: np.ndarray):
     return fun
 
 
-def gradient_matching(model: InducedModel, t_eval, gp: "GP | None" = None, device: "torch.device | None" = None,
-                      n_samples: "int | None" = None, n_restarts: int = 1, seed=None, power: float = 2.0, **kwargs):
+def gradient_matching(model: InducedModel, t_eval, gp=None, device: "torch.device | None" = None,
+                      n_samples: "int | None" = None, n_restarts: int = 1, seed=None, **kwargs):
     """
-    Estimate a candidate's constants by gradient matching against a GP of its state variables - a
-    thin PyBM-side adapter around `odestimate.gradient_matching`. Two modes:
+    Estimate a candidate's constants by gradient matching against an interpolant (a GP) of its state
+    variables - a thin PyBM-side adapter. Two modes:
 
-    - default (`n_samples` None): least squares between the GP's derivative and f at the GP's mean,
-      at the points `t_eval`, over the constants that appear in this candidate's equations
-      (`build_problem`, numpy), within their ranges, from `n_restarts` starts.
+    - default (`n_samples` None): `odestimate.matching.gradient_matching` - the interpolant's
+      derivative against f at the interpolant, at the points `t_eval`, over the constants that appear
+      in this candidate's equations (`build_problem`), within their ranges, from `n_restarts` starts.
     - `n_samples` given: the screening pass of `pybm.estimate.estimate.estimate_models_gradient_matching`
       (`_screening`): `odestimate.gradient_matching.uniform_trust_region` on `n_samples` random points
       of [t_eval[0], t_eval[-1]], torch, every constant, plus a confidence interval (`.interval`).
@@ -108,11 +109,11 @@ def gradient_matching(model: InducedModel, t_eval, gp: "GP | None" = None, devic
     ----------
     model : InducedModel
     t_eval : array-like
-        Default mode: where the derivatives are matched, and where the state variables' data is read
-        to fit a GP when `gp` is None. Screening mode: see `_screening`.
-    gp : odestimate.gp.regressor.GP, optional
-        A GP of the state variables (state-variable order) fitted elsewhere, e.g. once for every
-        candidate. Default: fitted on the state variables' data at t_eval.
+        Default mode: the matching points, and where the state variables' data is read to fit a GP
+        when `gp` is None. Screening mode: see `_screening`.
+    gp : optional
+        Interpolant of the state variables (state-variable order) fitted elsewhere, e.g. a GP once for
+        every candidate. Default: a GP fitted on the state variables' data at t_eval.
     device : torch.device, optional
         Screening mode only.
     n_samples : int, optional
@@ -123,40 +124,51 @@ def gradient_matching(model: InducedModel, t_eval, gp: "GP | None" = None, devic
         the fit with the lowest cost is returned, with .restart_costs (`pybm.estimate.restarts`).
     seed : int, optional
         Seed of those draws.
-    power : float
-        Default mode: the loss ½ Σ |r|^power (`odestimate.gradient_matching.powered`).
     **kwargs :
-        Default mode: forwarded to `scipy.optimize.least_squares` (ftol, xtol, gtol, max_nfev, ...).
-        Screening mode: to `uniform_trust_region`.
+        Default mode: forwarded to `odestimate.matching.core.matching` (power, s, gp_kwargs) and from
+        there to `scipy.optimize.least_squares` (ftol, xtol, gtol, max_nfev). Screening mode: to
+        `uniform_trust_region`.
 
     Returns
     -------
     scipy.optimize.OptimizeResult
-        least_squares' result; .x (and .theta) the fitted constants - in the default mode only the
-        ones the equations use, in `build_problem` order - with .model, .consts (every constant, in
-        `index_in_ctx` order) and .const_by_name attached.
+        The estimator's result; .theta the fitted constants that the equations use (`build_problem`
+        order), with .model, .consts (every constant, in `index_in_ctx` order) and .const_by_name.
     """
     if n_samples is not None:
         return _screening(model, t_eval, gp, device, n_samples=n_samples, **kwargs)
+    return _matching(model, t_eval, "derivative", gp, n_restarts, seed, kwargs)
+
+
+def integral_matching(model: InducedModel, t_eval, gp=None, n_restarts: int = 1, seed=None, **kwargs):
+    """
+    `gradient_matching` (default mode) with integral matching: the interpolant's increments over
+    windows ending at the points `t_eval` against the integral of f over them
+    (`odestimate.matching.integral_matching`; `window`, `n_quad` in **kwargs). No derivative of the
+    interpolant.
+    """
+    return _matching(model, t_eval, "integral", gp, n_restarts, seed, kwargs)
+
+
+def _matching(model, t_eval, form, gp, n_restarts, seed, kwargs):
+    from odestimate.matching import matching
     from pybm.estimate.restarts import best_of  # imports build_problem from here
 
     model.switch_engine("scipy")
     t_eval = np.asarray(t_eval, dtype=float)
     state_vars, _, _ = model.split_endo_vars()
-    if gp is None:
-        gp = GP(t_eval, _get_data_tensor(state_vars, t_eval, torch.device("cpu"), torch.float64).numpy())
-    if len(gp) != len(state_vars):
-        raise ValueError(f"gp has {len(gp)} component(s), the model {len(state_vars)} state variable(s).")
+    xs = np.full((len(t_eval), len(state_vars)), np.nan)
+    if gp is None:  # only to fit the GP
+        xs = _get_data_tensor(state_vars, t_eval, torch.device("cpu"), torch.float64).numpy().T
 
     f, theta_0, (lo, hi), free_idx = build_problem(model, "scipy")
-    xs, dxs = gp.mean(t_eval), gp.derivative(t_eval)
-    fit = lambda start: _gradient_matching(t_eval, xs, dxs, f, start, engine="scipy", power=power, bounds=(lo, hi), **kwargs)
+    fit = lambda start: matching(f, t_eval, xs, start, matched="all", form=form, gp=gp, points=t_eval,
+                                 bounds=(lo, hi), **kwargs)
     result = fit(theta_0) if n_restarts == 1 else best_of(fit, model, n_restarts, seed)
 
     all_lo, all_hi = _const_bounds(model)
     consts = np.clip(_initial_const_guess(model), all_lo, all_hi)
-    consts[free_idx] = result.x
-    result.theta = result.x
+    consts[free_idx] = result.theta
     result.model = model
     result.consts = consts
     result.const_by_name = {name: float(consts[c.index_in_ctx]) for name, c in model.consts.items()}
