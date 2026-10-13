@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from odestimate.gp.regressor import GP
+from odestimate.gradient_matching import gradient_matching as _gradient_matching
 from odestimate.gradient_matching import uniform_trust_region
 from pybm.model import InducedModel, _get_data_tensor, _make_observation, _make_rhs, _make_rhs_numpy
 from pybm.model_graph import collect_leaves
@@ -90,9 +91,82 @@ def _with_free_consts(g, engine: str, free_idx: np.ndarray, full0: np.ndarray):
     return fun
 
 
-def gradient_matching(model: InducedModel, t_eval, gp: "GP | None" = None, device: "torch.device | None" = None, **kwargs):
+def gradient_matching(model: InducedModel, t_eval, gp: "GP | None" = None, device: "torch.device | None" = None,
+                      n_samples: "int | None" = None, n_restarts: int = 1, seed=None, power: float = 2.0, **kwargs):
     """
-    Estimate parameters of a model using gradient matching - a thin PyBM-side adapter around
+    Estimate a candidate's constants by gradient matching against a GP of its state variables - a
+    thin PyBM-side adapter around `odestimate.gradient_matching`. Two modes:
+
+    - default (`n_samples` None): least squares between the GP's derivative and f at the GP's mean,
+      at the points `t_eval`, over the constants that appear in this candidate's equations
+      (`build_problem`, numpy), within their ranges, from `n_restarts` starts.
+    - `n_samples` given: the screening pass of `pybm.estimate.estimate.estimate_models_gradient_matching`
+      (`_screening`): `odestimate.gradient_matching.uniform_trust_region` on `n_samples` random points
+      of [t_eval[0], t_eval[-1]], torch, every constant, plus a confidence interval (`.interval`).
+
+    Parameters
+    ----------
+    model : InducedModel
+    t_eval : array-like
+        Default mode: where the derivatives are matched, and where the state variables' data is read
+        to fit a GP when `gp` is None. Screening mode: see `_screening`.
+    gp : odestimate.gp.regressor.GP, optional
+        A GP of the state variables (state-variable order) fitted elsewhere, e.g. once for every
+        candidate. Default: fitted on the state variables' data at t_eval.
+    device : torch.device, optional
+        Screening mode only.
+    n_samples : int, optional
+        Switches to the screening mode.
+    n_restarts : int
+        Default mode: number of starts - 1 is the usual start only (initial values, else the middle
+        of the ranges); otherwise also n_restarts - 1 starts drawn uniformly within the ranges, and
+        the fit with the lowest cost is returned, with .restart_costs (`pybm.estimate.restarts`).
+    seed : int, optional
+        Seed of those draws.
+    power : float
+        Default mode: the loss ½ Σ |r|^power (`odestimate.gradient_matching.powered`).
+    **kwargs :
+        Default mode: forwarded to `scipy.optimize.least_squares` (ftol, xtol, gtol, max_nfev, ...).
+        Screening mode: to `uniform_trust_region`.
+
+    Returns
+    -------
+    scipy.optimize.OptimizeResult
+        least_squares' result; .x (and .theta) the fitted constants - in the default mode only the
+        ones the equations use, in `build_problem` order - with .model, .consts (every constant, in
+        `index_in_ctx` order) and .const_by_name attached.
+    """
+    if n_samples is not None:
+        return _screening(model, t_eval, gp, device, n_samples=n_samples, **kwargs)
+    from pybm.estimate.restarts import best_of  # imports build_problem from here
+
+    model.switch_engine("scipy")
+    t_eval = np.asarray(t_eval, dtype=float)
+    state_vars, _, _ = model.split_endo_vars()
+    if gp is None:
+        gp = GP(t_eval, _get_data_tensor(state_vars, t_eval, torch.device("cpu"), torch.float64).numpy())
+    if len(gp) != len(state_vars):
+        raise ValueError(f"gp has {len(gp)} component(s), the model {len(state_vars)} state variable(s).")
+
+    f, theta_0, (lo, hi), free_idx = build_problem(model, "scipy")
+    xs, dxs = gp.mean(t_eval), gp.derivative(t_eval)
+    fit = lambda start: _gradient_matching(t_eval, xs, dxs, f, start, engine="scipy", power=power, bounds=(lo, hi), **kwargs)
+    result = fit(theta_0) if n_restarts == 1 else best_of(fit, model, n_restarts, seed)
+
+    all_lo, all_hi = _const_bounds(model)
+    consts = np.clip(_initial_const_guess(model), all_lo, all_hi)
+    consts[free_idx] = result.x
+    result.theta = result.x
+    result.model = model
+    result.consts = consts
+    result.const_by_name = {name: float(consts[c.index_in_ctx]) for name, c in model.consts.items()}
+    return result
+
+
+def _screening(model: InducedModel, t_eval, gp: "GP | None" = None, device: "torch.device | None" = None, **kwargs):
+    """
+    The screening mode of `gradient_matching` (with `n_samples`): estimate parameters of a model
+    using gradient matching - a thin PyBM-side adapter around
     `odestimate.gradient_matching.uniform_trust_region`, which does the actual work (GP fit +
     least-squares against the GP-implied derivative, plus a confidence interval - see
     `notes/gradient-matching-pruning.md`). All this function does is turn a PyBM `InducedModel`

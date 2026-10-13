@@ -4,10 +4,12 @@ from odestimate.latent.collocation import collocation as _collocation
 
 from pybm.estimate.gradient_matching import build_observation, build_problem
 from pybm.estimate.preprocess import _const_bounds, _initial_const_guess
+from pybm.estimate.restarts import best_of
 from pybm.model import InducedModel, _get_data_tensor
 
 
-def collocation(model: InducedModel, t_eval, theta_0=None, unobserved_inits=None, **kwargs):
+def collocation(model: InducedModel, t_eval, theta_0=None, unobserved_inits=None, n_restarts: int = 1, seed=None,
+                **kwargs):
     """
     Estimate a candidate's constants by collocation - a thin PyBM-side adapter around
     `odestimate.latent.collocation.collocation`, which does the actual work. Turns the
@@ -32,6 +34,12 @@ def collocation(model: InducedModel, t_eval, theta_0=None, unobserved_inits=None
     theta_0 : array-like, optional
         Start for the free constants, in `build_problem` order (e.g. another method's `.theta`).
         Default: their initial values.
+    n_restarts : int
+        Number of starts: 1 is theta_0 only; otherwise also n_restarts - 1 starts drawn uniformly
+        within the constants' ranges (`pybm.estimate.restarts`), and the fit with the lowest cost
+        is returned, with .restart_costs.
+    seed : int, optional
+        Seed of those draws.
     unobserved_inits : array-like, optional
         Start for the state variables without data, see `collocation`. Default: their declared
         `initial` values at t_eval[0], carried forward with the initial constants - meant for the
@@ -74,8 +82,9 @@ def collocation(model: InducedModel, t_eval, theta_0=None, unobserved_inits=None
         observe = build_observation(model, observed_names, "scipy")
         ys = read(observed_vars)
 
-    result = _collocation(f, t_eval, xs, theta_0, unobserved_inits=unobserved_inits, observe=observe, ys=ys,
-                          bounds=(lo, hi), **kwargs)
+    fit = lambda start: _collocation(f, t_eval, xs, start, unobserved_inits=unobserved_inits, observe=observe, ys=ys,
+                                     bounds=(lo, hi), **kwargs)
+    result = fit(theta_0) if n_restarts == 1 else best_of(fit, model, n_restarts, seed, first=theta_0)
 
     all_lo, all_hi = _const_bounds(model)
     consts = np.clip(_initial_const_guess(model), all_lo, all_hi)

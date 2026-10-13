@@ -8,6 +8,7 @@ from pybm.estimate.gradient_matching import gradient_matching
 from pybm.estimate.multishooting import multishooting
 from pybm.estimate.magi import magi
 from pybm.estimate.collocation import collocation
+from pybm.estimate.gm_collocation import gm_collocation
 from pybm.model import InducedModel, _get_data_tensor
 
 
@@ -102,6 +103,19 @@ def estimate_models_collocation(models, t_eval, **kwargs):
     results = []
     for model in tqdm(models, desc="Estimating models", total=len(models)):
         results.append(collocation(model, t_eval, **kwargs))
+    best_result = min(results, key=lambda r: r.cost)
+    return {"best_result": best_result, "all_results": results}
+
+
+def estimate_models_gm_collocation(models, t_eval, **kwargs):
+    """
+    Estimate every candidate in `models` by gradient matching on the observed state variables and
+    collocation for the unobserved ones (`pybm.estimate.gm_collocation.gm_collocation`), each on its
+    own. Pass `gp` in **kwargs to share one GP of the observed state variables across candidates.
+    """
+    results = []
+    for model in tqdm(models, desc="Estimating models", total=len(models)):
+        results.append(gm_collocation(model, t_eval, **kwargs))
     best_result = min(results, key=lambda r: r.cost)
     return {"best_result": best_result, "all_results": results}
 
