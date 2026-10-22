@@ -1,0 +1,86 @@
+% Auriga theme
+% https://github.com/anishathalye/auriga
+
+\documentclass[14pt,aspectratio=169]{beamer}
+\usepackage{pgfpages}
+\usepackage{fancyvrb}
+\usepackage{tikz}
+\usepackage{pgfplots}
+
+\newif\ifnotes % \notestrue to show speaker notes on a second screen
+\ifnotes
+\setbeamertemplate{note page}[plain]
+\setbeameroption{show notes on second screen=right}
+\fi
+
+\usetheme{auriga}
+\usecolortheme{auriga}
+
+% define some colors for a consistent theme across slides
+\definecolor{red}{RGB}{181, 23, 0}
+\definecolor{blue}{RGB}{0, 118, 186}
+\definecolor{gray}{RGB}{146, 146, 146}
+\definecolor{title_color}{RGB}{0, 118, 186}
+
+
+\settitlecolor{title_color}
+\title{Results on PBM-driven ODE discovery and ODE parameter estimation}
+
+\author{Urh Primožič, IJS}
+
+
+
+\begin{document}
+
+{
+  % rather than use the frame options [noframenumbering,plain], we make the
+  % color match, so that the indicated page numbers match PDF page numbers
+  \setbeamercolor{page number in head/foot}{fg=white}
+  \begin{frame}
+    \titlepage
+  \end{frame}
+}
+
+\begin{frame}{ODE discovery with Probmot}
+TODO delovanje in potrebe po novem sistemu 
+\end{frame}
+ \begin{frame}{Structure changes}
+    Kar je novega v pybm, primerjava s probmotom  
+ \end{frame}
+ \begin{frame}{Other possible solutions}
+    Vsi speedupi, ki niso implementirani, minus estimacija
+ \end{frame}
+ \begin{frame}{Parameter estimation}
+    problem , unobserved vs observed
+ \end{frame}
+\begin{frame}{Integration using multishooting}
+    
+\end{frame}
+\begin{frame}{Matching}
+    
+\end{frame}
+\begin{frame}{Integral matching }
+    
+\end{frame}
+\begin{frame}{Batteling caotic loss surface}
+    Integral lenght, homotopic methods
+\end{frame}
+\begin{frame}{Collocation}
+    matching on unobserved
+\end{frame}
+\begin{frame}{Note on MAGI}
+    TODO razlike 
+\end{frame}
+\begin{frame}{Question: lenght of integration interval}
+    
+\end{frame}
+\begin{frame}{Results}
+    
+\end{frame}
+\begin{frame}{Back to ProBmot}
+    
+\end{frame}
+
+
+
+\end{document}
