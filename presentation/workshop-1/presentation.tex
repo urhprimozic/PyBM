@@ -6,6 +6,9 @@
 \usepackage{fancyvrb}
 \usepackage{tikz}
 \usepackage{pgfplots}
+\usepackage[backend=biber, style=authoryear, maxcitenames=2, url=false]{biblatex}
+\addbibresource{references.bib}
+\setbeamerfont{footnote}{size=\tiny}
 
 \newif\ifnotes % \notestrue to show speaker notes on a second screen
 \ifnotes
@@ -42,20 +45,97 @@
 }
 
 \begin{frame}{ODE discovery with Probmot}
-TODO delovanje in potrebe po novem sistemu 
+\begin{itemize}
+    \item processes between entities (predator-prey models,...)
+    \item build a list of possible models $[\vec{x}'(t)=\vec F_i(\vec{x}(t), t, \theta^{(i)})]_i$
+    \item \textbf{estimate model parameters $\theta^{(i)}$}
+    \item evaluate all possible models
+\end{itemize}
 \end{frame}
  \begin{frame}{Structure changes}
-    Kar je novega v pybm, primerjava s probmotom  
+    \begin{itemize}
+        \item migration from Java to Python
+        \item gradient opt instead of EA 
+        \item magnitutes faster parameter estimation
+        \item conditional statemets support $x'(t) = \begin{cases}
+            f(x,t, \theta) & \phi(x, t, \theta) > 0 \\
+            g(x,t,\theta) & \text{otherwise}
+        \end{cases}$
+    \end{itemize}
  \end{frame}
  \begin{frame}{Other possible solutions}
-    Vsi speedupi, ki niso implementirani, minus estimacija
+    \begin{itemize}
+        \item JIT compiled $F(x,t,\theta)$
+        \item clever structure search 
+        \item precise estimation just for best candidates
+    \end{itemize}
+ \end{frame}
+ \begin{frame}{Relaxed conditionals}
+\begin{minipage}{.5\textwidth}
+\centering 
+\begin{align*}
+    F &= \begin{cases}
+        f & \theta \geq 0 \\
+        g & \text{otherwise}
+    \end{cases} \\
+     \tilde F &= \frac{f + g}{2} + \frac{f - g}{2}\tanh\frac{\theta}{\varepsilon}
+\end{align*}
+\end{minipage}%
+\begin{minipage}{.5\textwidth}
+\includegraphics[width=\linewidth]{plots/relaxed_conditional.pdf}
+\end{minipage}
  \end{frame}
  \begin{frame}{Parameter estimation}
-    problem , unobserved vs observed
+    \begin{itemize}
+        \item $x\colon [t_0, t_1] \to \mathbb{R}^n$
+        \item $x_\text{obs} = (x_{o_1}, x_{o_2}, \dotsc, x_{o_{n_\text{obs}}}) \in \mathbb{R}^{n_\text{obs}}$
+    \end{itemize}
+    %Let $x\colon [t_0, t_1] \to \mathbb{R}^n$ and 
+    %$x_\text{obs} = (x_{o_1}, x_{o_2}, \dotsc, x_{o_{n_\text{obs}}})^T \in \mathbb{R}^{n_\text{obs}}$.
+    \hfill
+    \begin{graphicbox}[boxrule=2pt] 
+    Given 
+    \begin{itemize}
+        \item ODE $ x'(t) =  F( x(t), t, \theta)$
+        \item  measurments $(t_i, x_\text{obs}(t_i) + \epsilon_i)$, $\epsilon_i \sim N(\mu, \sigma^2)$
+    \end{itemize} 
+    estimate $\theta$.
+\end{graphicbox}
  \end{frame}
-\begin{frame}{Integration using multishooting}
-    
+\begin{frame}{Integration using multishooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
+    \begin{itemize}
+        \item integration: pick $x(t_0)$, solve ODE for $x_\theta(t)$, min discrepancy $\mathcal{L}(x_\theta)$ on data
+        \item problem: caotic system
+        \item solution: integrate shorter intervals, join trajectories   
+    \end{itemize}
 \end{frame}
+\begin{frame}{Integration using multishooting}
+\begin{figure}
+    \centering
+    \includegraphics[height=0.7\textheight]{plots/multishooting.pdf}
+    \caption{
+        \tiny
+    Multiple shooting for $x(t) = \sin(\theta t)/t$ on $[1, 5]$,
+        $\theta_\text{true} = 1$, evaluated at $\theta = 0.7$ with 10 intervals.
+        Data: 16 points with noise $\mathcal{N}(0, 0.05^2)$;
+        initial values perturbed by $\mathcal{U}(-0.1, 0.1)$.}
+\end{figure}
+\end{frame}
+\begin{frame}{Integration using multishooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
+        \begin{graphicbox}[boxrule=2pt, title=Multishooting] 
+        minimize discrepancy on data
+        $$ \sum_i \mathcal{L}(x_i), \quad \text{where } x_i'=F(x_i,t,\theta), x_i(t_i)=s_i$$
+        on 
+        $$
+        x_i(t_{i+1}) = s_i \quad \forall i=0,1, \dots N_\text{subintervals}
+        $$
+    \end{graphicbox}
+\end{frame}
+%\begin{frame}{Hyperparameters of multishooting}
+%       \begin{frame}
+%        
+%       \end{frame}
+%\end{frame}
 \begin{frame}{Matching}
     
 \end{frame}

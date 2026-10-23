@@ -1,0 +1,68 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{nyt/global//global/global/global}
+    \entry{aydogmus2020modifiedmultipleshootingalgorithm}{misc}{}{}
+      \name{author}{2}{}{%
+        {{un=0,uniquepart=base,hash=668fadd8a43866b8a19f8e7bfa54ab4f}{%
+           family={Aydogmus},
+           familyi={A\bibinitperiod},
+           given={Ozgur},
+           giveni={O\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=73d708ddab0e5804769915eaad2e7a61}{%
+           family={Tor},
+           familyi={T\bibinitperiod},
+           given={Ali\bibnamedelima Hakan},
+           giveni={A\bibinitperiod\bibinitdelim H\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{fullhash}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{fullhashraw}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{bibnamehash}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{authorbibnamehash}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{authornamehash}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{authorfullhash}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \strng{authorfullhashraw}{db59254a76d5fcf3e5af9edabefbfa9f}
+      \field{sortinit}{A}
+      \field{sortinithash}{2f401846e2029bad6b3ecc16d50031e2}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{eprintclass}{math.OC}
+      \field{eprinttype}{arXiv}
+      \field{title}{A Modified Multiple Shooting Algorithm for Parameter Estimation in ODEs Using Adjoint Sensitivity Analysis}
+      \field{year}{2020}
+      \verb{eprint}
+      \verb 2006.15740
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2006.15740
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2006.15740
+      \endverb
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+

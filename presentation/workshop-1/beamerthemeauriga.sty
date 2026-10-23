@@ -10,6 +10,7 @@
 \RequirePackage{changepage}
 \RequirePackage{fontspec}
 \RequirePackage{xpatch}
+\RequirePackage{tcolorbox}
 
 % ====================
 % Fonts
@@ -41,7 +42,8 @@
 
 \newcommand{\samelineand}{\qquad}
 % color of all titles at once, e.g. \settitlecolor{blue}
-\newcommand{\settitlecolor}[1]{\setbeamercolor{titlelike}{fg=#1}}
+\colorlet{graphicbox frame}{black}
+\newcommand{\settitlecolor}[1]{\setbeamercolor{titlelike}{fg=#1}\colorlet{graphicbox frame}{#1}}
 
 % ====================
 % Elements
@@ -71,11 +73,12 @@
 \setlength\belowdisplayshortskip{2ex}
 
 % Caption
-\setlength{\abovecaptionskip}{2ex}
+\setlength{\abovecaptionskip}{0.5ex}
 \setlength{\belowcaptionskip}{1ex}
 \setbeamertemplate{caption}
 {
-    {\usebeamerfont{caption}\insertcaption}
+    % \par inside the group, so line spacing follows the caption font size
+    {\usebeamerfont{caption}\insertcaption\par}
 }
 
 % Navigation
@@ -106,6 +109,16 @@
     \usebeamerfont{page number in head/foot}%
     \hspace{2em}%
     \insertframenumber\kern1em\vskip2ex%
+}
+
+% Graphic box: rectangular frame in the title color,
+% extra tcolorbox options via the optional argument, e.g. \begin{graphicbox}[boxrule=2pt]
+\newtcolorbox{graphicbox}[1][]{
+    colframe=graphicbox frame, % set by \settitlecolor
+    colback=white,
+    sharp corners,
+    boxrule=1pt,
+    #1
 }
 
 % Frame title

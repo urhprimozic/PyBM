@@ -11,7 +11,8 @@ class RelaxedIfElse:
     Smooth  if/elif/.../else. 
 
     
-    `RelaxedIfElse().If(value, expr)` is equivalent to `if value >= 0 : expr` in the limit of eps -> 0.
+    `RelaxedIfElse().If(value, expr)` is equivalent to `if value <= 0 : expr` in the limit of eps -> 0.
+    With method="tanh" the branch weight is 0.5 * (1 - tanh(value / eps)).
 
     Usage
     ------
@@ -25,7 +26,7 @@ class RelaxedIfElse:
     ```
     becomes
     ```
-    RelaxedIfElse().If(c - t, expr1).Elif(d - t, expr2).Else(expr3)
+    RelaxedIfElse().If(t - c, expr1).Elif(t - d, expr2).Else(expr3)
     ```
 
     Parameters
