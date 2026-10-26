@@ -6,6 +6,8 @@
 \usepackage{fancyvrb}
 \usepackage{tikz}
 \usepackage{pgfplots}
+\usepackage{tabularx}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
 \usepackage[backend=biber, style=authoryear, maxcitenames=2, url=false]{biblatex}
 \addbibresource{references.bib}
 \setbeamerfont{footnote}{size=\tiny}
@@ -136,31 +138,125 @@
 %        
 %       \end{frame}
 %\end{frame}
-\begin{frame}{Matching}
-    
+\begin{frame}{Gradient matching for fully-observed systems}
+    \begin{itemize}
+        \item $\hat x(t)$ - interpolant of the data 
+        \item interpolation: gaussian processes\footfullcite{wenk2019fastgaussianprocessbased}, cubic splines\footfullcite{varah-splines}
+        %\item efective derivation
+    \end{itemize}
+    \begin{graphicbox}[boxrule=2pt, title=Least squares formulation]
+       Find $
+        \operatorname{argmin}\|\hat x'(t) - F(\hat x(t), t, \theta)  \|
+        $
+    \end{graphicbox}
 \end{frame}
-\begin{frame}{Integral matching }
-    
+\begin{frame}{Integral matching\footfullcite{integra-matching-reject}}
+% \begin{itemize}
+%     \item derivative are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$
+% \end{itemize}
+Derivatives are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$!
+    \begin{graphicbox}[boxrule=2pt]
+        Minimize
+        $$
+        %\mathcal{L}(\theta) = 
+        \displaystyle\int_{t_0}^{t_1} \left\|\hat x(t) -\hat x(\phi(t)) - \int_{\phi(t)} ^t F(\hat x(\tau), \tau, \theta) d\tau  \right\| dt 
+        $$
+    \end{graphicbox}
 \end{frame}
-\begin{frame}{Batteling caotic loss surface}
-    Integral lenght, homotopic methods
+\begin{frame}{Design choiches and challanges }
+    \begin{itemize}
+        \item bayesian vs least squares 
+        \item two-step approach vs joint estimation
+        \item choose integration interval
+        \item kernel choice
+        \item caotic loss surface -**homotopic approaches**\footfullcite{homotopy}
+    \end{itemize}
+\end{frame}
+\begin{frame}{Collocation\footfullcite{magi}}
+    \begin{itemize}
+        \item $x\colon I \to R^n$ partially observed
+        \item choose $l$ \emph{collocation} points $(\tau_1, s_1), (\tau_2, s_2), \cdots, (\tau_l, s_l) \in I\times R^n$  
+        \item $\hat x(t)$: interpolant of $(\tau_i, s_i)_{i}$, {\color{gray} hyperparameters $\phi$}
+        \item choose such $s=(s_1, \cdots, s_l), \phi$ that $\hat x(t)$ solves ODE and matches data 
+    \end{itemize}
 \end{frame}
 \begin{frame}{Collocation}
-    matching on unobserved
+%
+     \begin{small}
+        Let $ \hat x(t)$ interpolant of $(\tau_i, s_i)$ with hyperparameters $\phi$ and collocation points  $s=(s_1, \cdots, s_l)$. Let $(t_i, y_i)$ be a noisy set of measurments.
+     \end{small}
+ %    
+    \begin{graphicbox}
+        Find $s$, $\theta$, $phi$, minimizing\footnote{\cite{magi} use bayesian approach}
+        $$
+        ||
+         \hat x(t_i) - y_i
+        ||
+        $$
+        such that\footnote{Gradient matching. Integral matching can be used as well.} 
+        $$
+        \hat x'(t) = F(\hat x(t), t, \theta).
+        $$
+    \end{graphicbox}
 \end{frame}
-\begin{frame}{Note on MAGI}
-    TODO razlike 
+% \begin{frame}{Note on MAGI}
+%     TODO razlike 
+% \end{frame}
+\begin{frame}{Collocation vs integration}
+    %\begin{minipage}{.5\textwidth}
+    %    Multishooting solves ODE by 
+    %\end{minipage}
+    %\begin{minipage}{.5\textwidth}
+    %    
+    %\end{minipage}
+    \renewcommand{\arraystretch}{1.5}
+    \begin{tabularx}{\textwidth}{C|C}
+         \textbf{multishooting} & \textbf{collocation} \\
+         \hline
+         Freezes $\theta$, solves ODE & Changes both $\theta$ and $s$ until trajectory satisfies ODE \\
+         \hline
+         Additional parameters are initial values & Additional parameters are collocation points of the interpolant
+    \end{tabularx}
 \end{frame}
-\begin{frame}{Question: lenght of integration interval}
-    
+\begin{frame}{Desing choices and hyperparameters}
+    \begin{itemize}
+        \item bayesian, least squares, \emph{constrained problem}
+        \item gradient vs integral matching 
+        \item collocation points, manifold points, discrepancy points 
+    \end{itemize}
 \end{frame}
-\begin{frame}{Results}
-    
+\begin{frame}{\small Lotka--Volterra}
+        \centering
+    \includegraphics[height=0.85\textheight]{plots/trajectories_lv.pdf}
+    \tiny $
+    x_1' = \theta_1 x_1 - \theta_2 x_1 x_2, \quad 
+        x_2' = -\theta_3 x_2 + \theta_4 x_1 x_2$
 \end{frame}
-\begin{frame}{Back to ProBmot}
-    
-\end{frame}
+\begin{frame}{\small Protein transduction}
+    \centering
+    \includegraphics[height=0.83\textheight]{plots/trajectories_pt.pdf}
 
+    \tiny $
+        S' = -\theta_1 S - \theta_2 S R + \theta_3 R_S ,
+        S_d' = \theta_1 S ,
+        R' = -\theta_2 S R + \theta_3 R_S + \theta_5 \frac{R_{pp}}{\theta_6 + R_{pp}}$
 
-
+        $R_S' = \theta_2 S R - \theta_3 R_S - \theta_4 R_S ,
+        R_{pp}' = \theta_4 R_S - \theta_5 \frac{R_{pp}}{\theta_6 + R_{pp}}
+$
+\end{frame}
+\begin{frame}
+    \includegraphics[width=\textwidth]{plots/probmot.png}
+\end{frame}
+\begin{frame}
+    \includegraphics[width=\textwidth]{plots/zurich_bled.png}
+\end{frame}
+\begin{frame}{Research directions}
+    \begin{itemize}
+        \item small, domain-specific benchmarks, just integration methods 
+    \item 2026: 1100 synthetich benchmark problems - no methods
+    \item \textbf{no good benchmark}
+    \item collocation seems to join different approaches together $\rightarrow$ better method?
+    \end{itemize}
+\end{frame}
 \end{document}

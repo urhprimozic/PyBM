@@ -62,6 +62,244 @@
       \verb https://arxiv.org/abs/2006.15740
       \endverb
     \endentry
+    \entry{integra-matching-reject}{misc}{}{}
+      \name{author}{1}{}{%
+        {{un=0,uniquepart=base,hash=b1b9893fc783b10aae3e81407ea350ee}{%
+           family={Rossi},
+           familyi={R\bibinitperiod},
+           given={Baptiste\bibnamedelima T},
+           giveni={B\bibinitperiod\bibinitdelim T\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{fullhash}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{fullhashraw}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{bibnamehash}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{authorbibnamehash}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{authornamehash}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{authorfullhash}{b1b9893fc783b10aae3e81407ea350ee}
+      \strng{authorfullhashraw}{b1b9893fc783b10aae3e81407ea350ee}
+      \field{sortinit}{R}
+      \field{sortinithash}{5e1c39a9d46ffb6bebd8f801023a9486}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{{ODE} Parameter Identification: An Integral Matching Approach}
+      \field{year}{2025}
+      \verb{urlraw}
+      \verb https://openreview.net/forum?id=X3IcgZEUEi
+      \endverb
+      \verb{url}
+      \verb https://openreview.net/forum?id=X3IcgZEUEi
+      \endverb
+    \endentry
+    \entry{varah-splines}{article}{}{}
+      \name{author}{1}{}{%
+        {{un=0,uniquepart=base,hash=c6ff97d9c99f8607aa93caffe0daf833}{%
+           family={Varah},
+           familyi={V\bibinitperiod},
+           given={J.\bibnamedelimi M.},
+           giveni={J\bibinitperiod\bibinitdelim M\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{fullhash}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{fullhashraw}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{bibnamehash}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{authorbibnamehash}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{authornamehash}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{authorfullhash}{c6ff97d9c99f8607aa93caffe0daf833}
+      \strng{authorfullhashraw}{c6ff97d9c99f8607aa93caffe0daf833}
+      \field{sortinit}{V}
+      \field{sortinithash}{afb52128e5b4dc4b843768c0113d673b}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{abstract}{In this paper, we describe a straightforward least squares approach to the problem of finding numerical values for parameters occurring in differential equations so that the solution best fits some observed data. The method consists of first fitting the given data by least squares using cubic spline functions with knots chosen interactively, and then finding the paramters by least squares solution of the differential equation sampled at a set of points. We illustrate the method by four problems from chemical and biological modeling.}
+      \field{journaltitle}{SIAM Journal on Scientific and Statistical Computing}
+      \field{number}{1}
+      \field{title}{A Spline Least Squares Method for Numerical Parameter Estimation in Differential Equations}
+      \field{volume}{3}
+      \field{year}{1982}
+      \field{pages}{28\bibrangedash 46}
+      \range{pages}{19}
+      \verb{doi}
+      \verb 10.1137/0903003
+      \endverb
+      \verb{eprint}
+      \verb https://doi.org/10.1137/0903003
+      \endverb
+      \verb{urlraw}
+      \verb https://doi.org/10.1137/0903003
+      \endverb
+      \verb{url}
+      \verb https://doi.org/10.1137/0903003
+      \endverb
+    \endentry
+    \entry{homotopy}{article}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=b96616e885aa5c92d7c07effdfb82763}{%
+           family={Vyasarayani},
+           familyi={V\bibinitperiod},
+           given={Chandrika},
+           giveni={C\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=998370203aa3f4c9d42ef8bb1b66992a}{%
+           family={Uchida},
+           familyi={U\bibinitperiod},
+           given={Thomas},
+           giveni={T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=a87cf2a66b573dbad3a15efeb303475a}{%
+           family={McPhee},
+           familyi={M\bibinitperiod},
+           given={John},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{d2a9d93554060a6914e68397a051f1a3}
+      \strng{fullhash}{43000c826f7af49c1af07a7997c1d0df}
+      \strng{fullhashraw}{43000c826f7af49c1af07a7997c1d0df}
+      \strng{bibnamehash}{43000c826f7af49c1af07a7997c1d0df}
+      \strng{authorbibnamehash}{43000c826f7af49c1af07a7997c1d0df}
+      \strng{authornamehash}{d2a9d93554060a6914e68397a051f1a3}
+      \strng{authorfullhash}{43000c826f7af49c1af07a7997c1d0df}
+      \strng{authorfullhashraw}{43000c826f7af49c1af07a7997c1d0df}
+      \field{sortinit}{V}
+      \field{sortinithash}{afb52128e5b4dc4b843768c0113d673b}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Physical Review E}
+      \field{month}{03}
+      \field{title}{Single-shooting homotopy method for parameter identification in dynamical systems}
+      \field{volume}{85}
+      \field{year}{2012}
+      \field{pages}{036201}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1103/PhysRevE.85.036201
+      \endverb
+    \endentry
+    \entry{wenk2019fastgaussianprocessbased}{misc}{}{}
+      \name{author}{6}{}{%
+        {{un=0,uniquepart=base,hash=bd74efe05e969457ca342a2c3723f669}{%
+           family={Wenk},
+           familyi={W\bibinitperiod},
+           given={Philippe},
+           giveni={P\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=31c788d362909a48358c50ada7df9a5b}{%
+           family={Gotovos},
+           familyi={G\bibinitperiod},
+           given={Alkis},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=6e0afe0dd7f80126ec663a279b8d6212}{%
+           family={Bauer},
+           familyi={B\bibinitperiod},
+           given={Stefan},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=cd1bfc14c101de2ce0ffe4684e63a141}{%
+           family={Gorbach},
+           familyi={G\bibinitperiod},
+           given={Nico},
+           giveni={N\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=112eb0b147c4a7f674d015a86e5dea70}{%
+           family={Krause},
+           familyi={K\bibinitperiod},
+           given={Andreas},
+           giveni={A\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=335c89d2252c8ad41635e8f3315696d1}{%
+           family={Buhmann},
+           familyi={B\bibinitperiod},
+           given={Joachim\bibnamedelima M.},
+           giveni={J\bibinitperiod\bibinitdelim M\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{9808486ca72d5844314470f414808919}
+      \strng{fullhash}{7f2c593999a4a137d7f252d1774a0165}
+      \strng{fullhashraw}{7f2c593999a4a137d7f252d1774a0165}
+      \strng{bibnamehash}{9808486ca72d5844314470f414808919}
+      \strng{authorbibnamehash}{9808486ca72d5844314470f414808919}
+      \strng{authornamehash}{9808486ca72d5844314470f414808919}
+      \strng{authorfullhash}{7f2c593999a4a137d7f252d1774a0165}
+      \strng{authorfullhashraw}{7f2c593999a4a137d7f252d1774a0165}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{eprintclass}{stat.ML}
+      \field{eprinttype}{arXiv}
+      \field{title}{Fast Gaussian Process Based Gradient Matching for Parameter Identification in Systems of Nonlinear ODEs}
+      \field{year}{2019}
+      \verb{eprint}
+      \verb 1804.04378
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/1804.04378
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/1804.04378
+      \endverb
+    \endentry
+    \entry{magi}{misc}{}{}
+      \name{author}{3}{}{%
+        {{un=0,uniquepart=base,hash=3ae93ad1d3c51ef3f4cb4ff1624ab6e0}{%
+           family={Wong},
+           familyi={W\bibinitperiod},
+           given={Samuel\bibnamedelimb W.\bibnamedelimi K.},
+           giveni={S\bibinitperiod\bibinitdelim W\bibinitperiod\bibinitdelim K\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=aa993828a1355e3ba8ae3214552d1137}{%
+           family={Yang},
+           familyi={Y\bibinitperiod},
+           given={Shihao},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=9187a570483a383c17e048dac2308a1a}{%
+           family={Kou},
+           familyi={K\bibinitperiod},
+           given={S.\bibnamedelimi C.},
+           giveni={S\bibinitperiod\bibinitdelim C\bibinitperiod},
+           givenun=0}}%
+      }
+      \strng{namehash}{6d5cd500ae42622a98becafc7f789dbd}
+      \strng{fullhash}{dddfabd9d6d5cf24d11d7a8f7146cbf0}
+      \strng{fullhashraw}{dddfabd9d6d5cf24d11d7a8f7146cbf0}
+      \strng{bibnamehash}{dddfabd9d6d5cf24d11d7a8f7146cbf0}
+      \strng{authorbibnamehash}{dddfabd9d6d5cf24d11d7a8f7146cbf0}
+      \strng{authornamehash}{6d5cd500ae42622a98becafc7f789dbd}
+      \strng{authorfullhash}{dddfabd9d6d5cf24d11d7a8f7146cbf0}
+      \strng{authorfullhashraw}{dddfabd9d6d5cf24d11d7a8f7146cbf0}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{eprintclass}{stat.CO}
+      \field{eprinttype}{arXiv}
+      \field{title}{MAGI: A Package for Inference of Dynamic Systems from Noisy and Sparse Data via Manifold-constrained Gaussian Processes}
+      \field{year}{2023}
+      \verb{eprint}
+      \verb 2203.06066
+      \endverb
+      \verb{urlraw}
+      \verb https://arxiv.org/abs/2203.06066
+      \endverb
+      \verb{url}
+      \verb https://arxiv.org/abs/2203.06066
+      \endverb
+    \endentry
   \enddatalist
 \endrefsection
 \endinput
