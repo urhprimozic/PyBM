@@ -46,9 +46,9 @@
   \end{frame}
 }
 
-\begin{frame}{ODE discovery with Probmot}
+\begin{frame}{ODE discovery with ProBMoT}
 \begin{itemize}
-    \item processes between entities (predator-prey models,...)
+    \item processes between entities (predator--prey models, \dots)
     \item build a list of possible models $[\vec{x}'(t)=\vec F_i(\vec{x}(t), t, \theta^{(i)})]_i$
     \item \textbf{estimate model parameters $\theta^{(i)}$}
     \item evaluate all possible models
@@ -58,18 +58,18 @@
     \begin{itemize}
         \item migration from Java to Python
         \item gradient opt instead of EA 
-        \item magnitutes faster parameter estimation
-        \item conditional statemets support $x'(t) = \begin{cases}
-            f(x,t, \theta) & \phi(x, t, \theta) > 0 \\
+        \item orders of magnitude faster parameter estimation
+        \item support for conditional statements $x'(t) = \begin{cases}
+            f(x,t, \theta) & c(x, t, \theta) \geq 0 \\
             g(x,t,\theta) & \text{otherwise}
         \end{cases}$
     \end{itemize}
  \end{frame}
- \begin{frame}{Other possible solutions}
+ \begin{frame}{Other speed-ups}
     \begin{itemize}
-        \item JIT compiled $F(x,t,\theta)$
+        \item JIT-compiled $F(x,t,\theta)$
         \item clever structure search 
-        \item precise estimation just for best candidates
+        \item precise estimation only for the best candidates
     \end{itemize}
  \end{frame}
  \begin{frame}{Relaxed conditionals}
@@ -80,8 +80,9 @@
         f & \theta \geq 0 \\
         g & \text{otherwise}
     \end{cases} \\
-     \tilde F &= \frac{f + g}{2} + \frac{f - g}{2}\tanh\frac{\theta}{\varepsilon}
+     \tilde F &= \frac{f + g}{2} + \frac{f - g}{2}\tanh\frac{c}{\varepsilon}
 \end{align*}
+{\small \color{gray} plot:  $f = 1$, $g = 0$}
 \end{minipage}%
 \begin{minipage}{.5\textwidth}
 \includegraphics[width=\linewidth]{plots/relaxed_conditional.pdf}
@@ -99,19 +100,29 @@
     Given 
     \begin{itemize}
         \item ODE $ x'(t) =  F( x(t), t, \theta)$
-        \item  measurments $(t_i, x_\text{obs}(t_i) + \epsilon_i)$, $\epsilon_i \sim N(\mu, \sigma^2)$
+        \item  measurements $(t_i, x_\text{obs}(t_i) + \epsilon_i)$, $\epsilon_i \sim N(0, \sigma^2)$
     \end{itemize} 
     estimate $\theta$.
 \end{graphicbox}
  \end{frame}
-\begin{frame}{Integration using multishooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
+\begin{frame}{Integration using multiple shooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
     \begin{itemize}
         \item integration: pick $x(t_0)$, solve ODE for $x_\theta(t)$, min discrepancy $\mathcal{L}(x_\theta)$ on data
-        \item problem: caotic system
+        \item problem: chaotic systems
         \item solution: integrate shorter intervals, join trajectories   
     \end{itemize}
 \end{frame}
-\begin{frame}{Integration using multishooting}
+\begin{frame}{Integration using multiple shooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
+        \begin{graphicbox}[boxrule=2pt, title=Multiple shooting] 
+        minimize discrepancy on data
+        $$ \sum_i \mathcal{L}(x_i), \quad \text{where } x_i'=F(x_i,t,\theta), x_i(t_i)=s_i$$
+        subject to
+        $$
+        x_i(t_{i+1}) = s_{i+1} \quad \forall i=0,1, \dots, N_\text{subintervals}-2
+        $$
+    \end{graphicbox}
+\end{frame}
+\begin{frame}{Integration using multiple shooting}
 \begin{figure}
     \centering
     \includegraphics[height=0.7\textheight]{plots/multishooting.pdf}
@@ -123,16 +134,6 @@
         initial values perturbed by $\mathcal{U}(-0.1, 0.1)$.}
 \end{figure}
 \end{frame}
-\begin{frame}{Integration using multishooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
-        \begin{graphicbox}[boxrule=2pt, title=Multishooting] 
-        minimize discrepancy on data
-        $$ \sum_i \mathcal{L}(x_i), \quad \text{where } x_i'=F(x_i,t,\theta), x_i(t_i)=s_i$$
-        on 
-        $$
-        x_i(t_{i+1}) = s_i \quad \forall i=0,1, \dots N_\text{subintervals}
-        $$
-    \end{graphicbox}
-\end{frame}
 %\begin{frame}{Hyperparameters of multishooting}
 %       \begin{frame}
 %        
@@ -141,12 +142,12 @@
 \begin{frame}{Gradient matching for fully-observed systems}
     \begin{itemize}
         \item $\hat x(t)$ - interpolant of the data 
-        \item interpolation: gaussian processes\footfullcite{wenk2019fastgaussianprocessbased}, cubic splines\footfullcite{varah-splines}
+        \item interpolation: Gaussian processes\footfullcite{wenk2019fastgaussianprocessbased}, cubic splines\footfullcite{varah-splines}
         %\item efective derivation
     \end{itemize}
     \begin{graphicbox}[boxrule=2pt, title=Least squares formulation]
        Find $
-        \operatorname{argmin}\|\hat x'(t) - F(\hat x(t), t, \theta)  \|
+        \operatorname{argmin}_\theta\|\hat x'(t) - F(\hat x(t), t, \theta)  \|
         $
     \end{graphicbox}
 \end{frame}
@@ -159,39 +160,31 @@ Derivatives are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$!
         Minimize
         $$
         %\mathcal{L}(\theta) = 
-        \displaystyle\int_{t_0}^{t_1} \left\|\hat x(t) -\hat x(\phi(t)) - \int_{\phi(t)} ^t F(\hat x(\tau), \tau, \theta) d\tau  \right\| dt 
+        \displaystyle\int_{t_0 + \Delta}^{t_1} \left\|\hat x(t) -\hat x(t - \Delta) - \int_{t - \Delta} ^t F(\hat x(\tau), \tau, \theta)\, d\tau  \right\| dt 
         $$
     \end{graphicbox}
 \end{frame}
-\begin{frame}{Design choiches and challanges }
-    \begin{itemize}
-        \item bayesian vs least squares 
-        \item two-step approach vs joint estimation
-        \item choose integration interval
-        \item kernel choice
-        \item caotic loss surface -**homotopic approaches**\footfullcite{homotopy}
-    \end{itemize}
-\end{frame}
 \begin{frame}{Collocation\footfullcite{magi}}
     \begin{itemize}
-        \item $x\colon I \to R^n$ partially observed
-        \item choose $l$ \emph{collocation} points $(\tau_1, s_1), (\tau_2, s_2), \cdots, (\tau_l, s_l) \in I\times R^n$  
+        \item $x\colon I \to \mathbb{R}^n$ partially observed
+        \item choose $l$ \emph{collocation} points $(\tau_1, s_1), (\tau_2, s_2), \dots, (\tau_l, s_l) \in I\times \mathbb{R}^n$  
         \item $\hat x(t)$: interpolant of $(\tau_i, s_i)_{i}$, {\color{gray} hyperparameters $\phi$}
-        \item choose such $s=(s_1, \cdots, s_l), \phi$ that $\hat x(t)$ solves ODE and matches data 
+        \item choose $s=(s_1, \dots, s_l)$ and $\phi$ such that $\hat x(t)$ solves the ODE and matches the data 
     \end{itemize}
 \end{frame}
 \begin{frame}{Collocation}
 %
      \begin{small}
-        Let $ \hat x(t)$ interpolant of $(\tau_i, s_i)$ with hyperparameters $\phi$ and collocation points  $s=(s_1, \cdots, s_l)$. Let $(t_i, y_i)$ be a noisy set of measurments.
+        Let $\hat x(t)$ be the interpolant of $(\tau_i, s_i)$ with hyperparameters $\phi$ and collocation points $s=(s_1, \dots, s_l)$. Let $(t_i, y_i)$ be a set of noisy measurements.
      \end{small}
  %    
     \begin{graphicbox}
-        Find $s$, $\theta$, $phi$, minimizing\footnote{\cite{magi} use bayesian approach}
+        \small
+        Find $s$, $\theta$, $\phi$ minimizing\footnote{\textcite{magi} use a Bayesian approach.}
         $$
-        ||
+        \sum_i \|
          \hat x(t_i) - y_i
-        ||
+        \|
         $$
         such that\footnote{Gradient matching. Integral matching can be used as well.} 
         $$
@@ -211,18 +204,20 @@ Derivatives are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$!
     %\end{minipage}
     \renewcommand{\arraystretch}{1.5}
     \begin{tabularx}{\textwidth}{C|C}
-         \textbf{multishooting} & \textbf{collocation} \\
+         \textbf{multiple shooting} & \textbf{collocation} \\
          \hline
-         Freezes $\theta$, solves ODE & Changes both $\theta$ and $s$ until trajectory satisfies ODE \\
+         Freezes $\theta$, solves the ODE & Changes both $\theta$ and $s$ until the trajectory satisfies the ODE \\
          \hline
          Additional parameters are initial values & Additional parameters are collocation points of the interpolant
     \end{tabularx}
 \end{frame}
-\begin{frame}{Desing choices and hyperparameters}
+\begin{frame}{Design choices and challenges}
     \begin{itemize}
-        \item bayesian, least squares, \emph{constrained problem}
-        \item gradient vs integral matching 
-        \item collocation points, manifold points, discrepancy points 
+        \item Bayesian, least squares, \emph{constrained problem}
+        \item two-step approach vs joint estimation
+        \item gradient vs integral matching, integration interval
+        \item kernel choice; collocation, manifold and discrepancy points
+        \item chaotic loss surface: \textbf{homotopy approaches}\footfullcite{homotopy}
     \end{itemize}
 \end{frame}
 \begin{frame}{\small Lotka--Volterra}
@@ -254,7 +249,7 @@ $
 \begin{frame}{Research directions}
     \begin{itemize}
         \item small, domain-specific benchmarks, just integration methods 
-    \item 2026: 1100 synthetich benchmark problems - no methods
+    \item 2026: 1100 synthetic benchmark problems - no methods
     \item \textbf{no good benchmark}
     \item collocation seems to join different approaches together $\rightarrow$ better method?
     \end{itemize}

@@ -2379,9 +2379,9 @@
     <bcf:citekey order="3" intorder="1">wenk2019fastgaussianprocessbased</bcf:citekey>
     <bcf:citekey order="4" intorder="1">varah-splines</bcf:citekey>
     <bcf:citekey order="5" intorder="1">integra-matching-reject</bcf:citekey>
-    <bcf:citekey order="6" intorder="1">homotopy</bcf:citekey>
+    <bcf:citekey order="6" intorder="1">magi</bcf:citekey>
     <bcf:citekey order="7" intorder="1">magi</bcf:citekey>
-    <bcf:citekey order="8" intorder="1">magi</bcf:citekey>
+    <bcf:citekey order="8" intorder="1">homotopy</bcf:citekey>
   </bcf:section>
   <!-- SORTING TEMPLATES -->
   <bcf:sortingtemplate name="nyt">

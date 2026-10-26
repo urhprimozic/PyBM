@@ -28,14 +28,16 @@ def plot_relaxed_conditional(filename, eps=0.1):
     loss_hard = [L(theta, F) for theta in thetas]
     loss_relaxed = [L(theta, relaxedF) for theta in thetas]
 
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    ax.plot(thetas, loss_hard, color="#2a78d6", lw=2, label=r"$x = \int_0^t F\,dt$")
+    # small figure, large font: it fills half a 14pt beamer slide
+    plt.rcParams.update({"font.size": 13})
+    fig, ax = plt.subplots(figsize=(4, 3))
+    ax.plot(thetas, loss_hard, color="#2a78d6", lw=2, label=r"$F$")
     ax.plot(thetas, loss_relaxed, color="#eb6834", lw=2,
-            label=rf"$x = \int_0^t \tilde F\,dt$ ($\varepsilon={eps}$)")
+            label=rf"$\tilde F$, $\varepsilon={eps}$")
     ax.set_xlabel(r"$\theta$")
     ax.set_ylabel(r"$\mathcal{L}(\theta)$")
     ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, loc="lower left", handlelength=1.2)  # θ < 0: both losses on top, room below
     fig.tight_layout()
     fig.savefig(filename, bbox_inches="tight", pad_inches=0.02)
     return fig, ax
