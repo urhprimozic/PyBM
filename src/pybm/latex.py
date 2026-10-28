@@ -4,6 +4,8 @@ LaTeX for the equations of an induced model.
     model.equations()                                  # constants as symbols
     model.equations_estimated(result.const_by_name)    # constants replaced by estimated values
 
+and plain text of a single expression, `text(expr, model)`.
+
 Both return one `aligned` block: first every state variable's ODE, then every algebraic variable
 in dependency order. In Jupyter: `IPython.display.Math(model.equations())`.
 
@@ -79,6 +81,37 @@ def equations_estimated(model: InducedModel, consts, labels: "dict[str, str] | N
         values = {name: float(consts[c.index_in_ctx]) for name, c in model.consts.items()}
     return _equations(model, labels, values=values, digits=round)
 
+
+def text(expr: Expr, model=None) -> str:
+    """
+    An expression as plain text, e.g. "((1.5 * prey.conc) * predator.conc)" - every binary operation
+    in parentheses, so the text shows the tree. Variables and constants are named as in `model.vars`
+    / `model.consts` (a Model or an InducedModel); without a model, or for one it doesn't list (e.g. a
+    process constant before induce()), as entity.name, or by their own name outside an entity.
+    """
+    names = {} if model is None else {id(obj): name for name, obj in {**model.vars, **model.consts}.items()}
+
+    def render(e) -> str:
+        if isinstance(e, (Var, Const)):
+            return names.get(id(e), e.name if e.entity is None else f"{e.entity.name}.{e.name}")
+        if isinstance(e, Num):
+            return repr(e.value)
+        if isinstance(e, Neg):
+            return f"-{render(e.operand)}"
+        if isinstance(e, BinOp):
+            return f"({render(e.left)} {e.symbol} {render(e.right)})"
+        if isinstance(e, FuncExpr):
+            return f"{e.name}({', '.join(render(a) for a in e.args)})"
+        if isinstance(e, (MaxExpr, MinExpr)):
+            return f"{'max' if isinstance(e, MaxExpr) else 'min'}({', '.join(render(o) for o in e.operands)})"
+        if isinstance(e, RelaxedIfExpr):
+            chain = "".join(f".{'If' if i == 0 else 'Elif'}({render(c)})({render(v)})" for i, (c, v) in enumerate(e.branches))
+            return f"{chain[1:]}.Else({render(e.default)})"
+        if isinstance(e, Choose):
+            return f"Choose({', '.join(render(o) for o in e.options)})"
+        raise TypeError(f"no text for an Expr of type {type(e).__name__!r}.")
+
+    return render(expr)
 
 def _equations(model, labels, values, digits) -> str:
     if not isinstance(model, InducedModel):

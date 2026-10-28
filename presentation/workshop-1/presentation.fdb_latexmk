@@ -1,12 +1,12 @@
 # Fdb version 4
-["biber presentation"] 1793011303.5735 "presentation.bcf" "presentation.bbl" "presentation" 1793015738.39743 0
-  "presentation.bcf" 1793015738.0511 108813 fae5623d209185d1b1736331b859c578 "pdflatex"
+["biber presentation"] 1793011303.5735 "presentation.bcf" "presentation.bbl" "presentation" 1793177548.73041 0
+  "presentation.bcf" 1793177548.39025 108813 fae5623d209185d1b1736331b859c578 "pdflatex"
   "references.bib" 1793004890.79751 3046 1f5f0424710b8bba15df394cff310a7a ""
   (generated)
   "presentation.bbl"
   "presentation.blg"
   (rewritten before read)
-["pdflatex"] 1793015732.09995 "/home/urhp/Documents/PyBM/presentation/workshop-1/presentation.tex" "presentation.pdf" "presentation" 1793015738.39802 0
+["pdflatex"] 1793177542.85596 "/home/urhp/Documents/PyBM/presentation/workshop-1/presentation.tex" "presentation.pdf" "presentation" 1793177548.73097 0
   "/etc/fonts/conf.d/10-hinting-slight.conf" 1769000055 620 5da52d777c5af2cb4b7445b81ead6c3d ""
   "/etc/fonts/conf.d/10-scale-bitmap-fonts.conf" 1769000055 2068 8588f87eaf68a1eb73920066f6817b48 ""
   "/etc/fonts/conf.d/10-sub-pixel-rgb.conf" 1769000055 672 e58e3be3a96cfa19b6cc53f27845e65a ""
@@ -120,9 +120,9 @@
   "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/fonts/otl/raleway-bolditalic.luc" 1792683025.64635 394818 4445c6d8fc53353e2a6e0205c0dc6f05 ""
   "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/fonts/otl/raleway-regular.luc" 1792683025.17335 373078 24da54565ecef70c8f83cf31daf38a2b ""
   "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/fonts/otl/raleway-regularitalic.luc" 1792683026.48535 356440 41996e5a510efed539cb9f576fadc8df ""
-  "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/names/luaotfload-lookup-cache.luc" 1793015737.0141 3511 a3608fd2d4853cecc20cb448ab528adc "pdflatex"
+  "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/names/luaotfload-lookup-cache.luc" 1793177547.45185 3511 a3608fd2d4853cecc20cb448ab528adc "pdflatex"
   "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/names/luaotfload-names.luc.gz" 1792683023.51734 445337 784e68536af73f3518fb6476d95a1ddc ""
-  "/home/urhp/Documents/PyBM/presentation/workshop-1/presentation.tex" 1793015725.37105 9484 de6f2a72991dcb759799547fb8bb26ef ""
+  "/home/urhp/Documents/PyBM/presentation/workshop-1/presentation.tex" 1793177529.67621 9529 086a86e7be4d5edc6600306c17eeb5fa ""
   "/usr/share/texlive/texmf-dist/fonts/opentype/impallari/raleway/Raleway-Bold.otf" 1744228897 125056 8ff25e8942449e0a0879f5a1d86c41f6 ""
   "/usr/share/texlive/texmf-dist/fonts/opentype/impallari/raleway/Raleway-Regular.otf" 1744228897 116760 df957c0c84b8a01d4a87518a749cb6e4 ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/public/amsfonts/cmextra/cmex7.tfm" 1246382020 1004 54797486969f23fa377b128694d548df ""
@@ -496,12 +496,12 @@
   "plots/trajectories_lv.pdf" 1793010444.77818 36301 4eee197a048ac99fd79d504105fdb477 ""
   "plots/trajectories_pt.pdf" 1793010446.94019 41616 7dedd90aa87ea04a48c14faf1cc7091a ""
   "plots/zurich_bled.png" 1793008296.93386 348801 0db975010e9a3caad94582b3f13be19a ""
-  "presentation.aux" 1793015738.0481 3986 a282a418fc2540ca5d81e2d6c6ed2d56 "pdflatex"
+  "presentation.aux" 1793177548.38725 4115 35d0e38a2bc32800d145a0a6b9c4b028 "pdflatex"
   "presentation.bbl" 1793011304.83598 12549 f69e88bbc8b425b9d07c4d1b7bf0d704 "biber presentation"
-  "presentation.nav" 1793015738.05336 2039 5a4196ea47006e239fc20568aaec1af6 "pdflatex"
-  "presentation.out" 1793015735.91009 0 d41d8cd98f00b204e9800998ecf8427e "pdflatex"
-  "presentation.run.xml" 1793015738.05336 2402 8198035c10a9fadf62f98caddd3bf28e "pdflatex"
-  "presentation.tex" 1793015725.37105 9484 de6f2a72991dcb759799547fb8bb26ef ""
+  "presentation.nav" 1793177548.39152 2132 9ecbcfc9f7de68c052dc9846a033acac "pdflatex"
+  "presentation.out" 1793177546.42624 0 d41d8cd98f00b204e9800998ecf8427e "pdflatex"
+  "presentation.run.xml" 1793177548.39152 2402 8198035c10a9fadf62f98caddd3bf28e "pdflatex"
+  "presentation.tex" 1793177529.67621 9529 086a86e7be4d5edc6600306c17eeb5fa ""
   (generated)
   "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/names/luaotfload-lookup-cache.lua"
   "/home/urhp/.texlive2025/texmf-var/luatex-cache/generic/names/luaotfload-lookup-cache.luc"

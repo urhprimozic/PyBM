@@ -31,7 +31,7 @@ from __future__ import annotations
 import copy as _copy
 import warnings
 from collections.abc import MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from typing import Any, Callable, Literal, TypedDict
 
@@ -275,6 +275,9 @@ class Var(Expr):
     index_in_ctx : int | None
         This variable's slot in an induced model's flat `ctx["vars"]` array. `None` until the
         model has been induced - see the module docstring.
+
+    Not a parameter: `entity`, the Entity this variable belongs to (set by the Entity, None for a
+    free-standing Var). Through it a Model finds the entities its processes use.
     """
 
     name: str
@@ -287,6 +290,7 @@ class Var(Expr):
     ode: "Expr | Choose | None" = None
     algebraic: "Expr | Choose | None" = None
     index_in_ctx: int | None = None
+    entity: "Entity | None" = field(default=None, init=False, repr=False, compare=False)
 
     def __call__(self, t, ctx: Context):
         """Reads this variable's current value at time `t` - exogenous vars from `data`,
@@ -314,7 +318,8 @@ class Const(Expr):
     """
     A constant parameter. Subclasses `Expr` like `Var`, so it can be used directly inside
     equations (`rate * conc`); `Const.__call__` ignores `t` (constants don't change over time)
-    but still accepts it, to match every other `Expr`'s `(t, ctx)` signature.
+    but still accepts it, to match every other `Expr`'s `(t, ctx)` signature. `entity`: the Entity
+    it belongs to, as for a `Var`.
     """
 
     name: str
@@ -322,6 +327,7 @@ class Const(Expr):
     range: tuple[float, float] | None = None
     unit: str | None = None
     index_in_ctx: int | None = None
+    entity: "Entity | None" = field(default=None, init=False, repr=False, compare=False)
 
     def __call__(self, t, ctx: Context):
         if self.index_in_ctx is None:
@@ -387,7 +393,7 @@ class Entity(MutableMapping):
     """
     A named bag of Vars/Consts (e.g. a population, a compartment). Supports `entity["conc"]` to
     look up one of its variables/constants by name, and dict-like iteration/`in`/`.get()` via
-    `MutableMapping`.
+    `MutableMapping`. Every Var/Const put in it gets `.entity` set to it.
 
     Usage
     -----
@@ -405,16 +411,20 @@ class Entity(MutableMapping):
             name = f"Entity_{id(self)}"
         self.name = name
         for arg in args:
-            self._data[arg.name] = arg
+            self[arg.name] = arg
 
     def __getitem__(self, name):
         return self._data[name]
 
     def __setitem__(self, name, value):
         self._data[name] = value
+        if isinstance(value, (Var, Const)):
+            value.entity = self
 
     def __delitem__(self, name):
-        del self._data[name]
+        value = self._data.pop(name)
+        if getattr(value, "entity", None) is self:
+            value.entity = None
 
     def __iter__(self):
         return iter(self._data)
@@ -439,6 +449,9 @@ class Process:
     templates.py) - a `Process` carries no context/index state of its own, so the same `Process`
     object can be shared freely while a model is still incomplete; only `Model.induce()` (via
     `copy.deepcopy`) ever needs an independent copy of one, once per resolved combination.
+
+    Its own constants need not be passed: every Const its equations use that belongs to no entity
+    and to none of its sub-processes is its own (after the passed ones, in the order they are used).
     """
 
     def __init__(self, *args: "Ode | Algebraic | Process | Const", name: str | None = None):
@@ -458,6 +471,14 @@ class Process:
                 self.processes.append(arg)
             else:
                 warnings.warn(f"Argument {arg} is not a valid process component. It will be ignored.")
+
+        taken = {id(const) for const in self.all_consts()}
+        for const in _referenced(self):
+            if isinstance(const, Const) and const.entity is None and id(const) not in taken:
+                if const.name in self.own_consts:
+                    raise ValueError(f"Two different constants named {const.name!r} in one process.")
+                self.own_consts[const.name] = const
+                taken.add(id(const))
 
         if name is None:
             warnings.warn("Process name is not set. Using a default name.")
@@ -504,6 +525,32 @@ class ChooseProcess:
         self.name = name
 
 
+def _referenced(*args: "Entity | Process | ChooseProcess | Var | Const") -> "list[Var | Const]":
+    """Every Var/Const the equations of `args` use: a Process's Ode/Algebraic variables and
+    expressions (nested processes included), every option of a ChooseProcess or Choose, the
+    equations set directly on a Var or on an Entity's Vars. In the order they are used."""
+    from pybm.model_graph import collect_leaves  # model_graph imports this module
+
+    found: "dict[int, Var | Const]" = {}
+    for arg in args:
+        if isinstance(arg, ChooseProcess):
+            found.update((id(obj), obj) for obj in _referenced(*arg.options))
+            continue
+        if isinstance(arg, Process):
+            entries = arg.all_odes() + arg.all_aes()
+            found.update((id(entry.var), entry.var) for entry in entries)
+            equations = [entry.expr for entry in entries]
+        else:
+            vars_ = arg.vars() if isinstance(arg, Entity) else [arg] if isinstance(arg, Var) else []
+            equations = [eq for var in vars_ for eq in (var.ode, var.algebraic) if eq is not None]
+        for eq in equations:
+            for expr in eq.options if isinstance(eq, Choose) else [eq]:
+                leaf_vars, leaf_consts = collect_leaves(expr)
+                found.update(leaf_vars)
+                found.update(leaf_consts)
+    return list(found.values())
+
+
 def _aggregate(exprs: "list[Expr]", aggregation: Aggregation) -> Expr:
     """Combines several processes' contributions to the same variable into one Expr, using the
     variable's aggregation method."""
@@ -539,6 +586,12 @@ class Model:
     resolve every open choice and get back one fully indexed, simulatable `InducedModel` per
     combination - even a model with no ambiguity at all must go through `induce()` (it will just
     return a single-element list), since that is the only place indices are assigned.
+
+    The entities don't have to be listed: `Model(growth, grazing)` adds every Entity whose Vars/
+    Consts the processes' equations use (every option of a `Choose`/`ChooseProcess` included), and
+    every free-standing Var they use. List an entity to keep a variable that no equation uses, e.g.
+    an exogenous one with data; listing one that is found anyway does no harm. The entities (and so
+    the variables' indices) are in the order they are first met: listed, or used by a listed process.
     """
 
     def __init__(
@@ -557,7 +610,13 @@ class Model:
             self.add(arg)
 
     def add(self, arg: "Entity | Process | ChooseProcess | Var | Const"):
+        """Adds `arg`, and the entities and free-standing Vars its equations use (see the class
+        docstring). A Var or Const of an entity adds that entity."""
+        if isinstance(arg, (Var, Const)) and arg.entity is not None:
+            arg = arg.entity
         if isinstance(arg, Entity):
+            if self.entities.get(arg.name) is arg:
+                return
             if arg.name in self.entities:
                 raise ValueError(f"Entity {arg.name} already exists in the model.")
             self.entities[arg.name] = arg
@@ -570,15 +629,34 @@ class Model:
                 raise ValueError(f"Process {arg.name} already exists in the model.")
             self.processes[arg.name] = arg
         elif isinstance(arg, Var):
+            if self.free_vars.get(arg.name) is arg:
+                return
             if arg.name in self.free_vars:
                 raise ValueError(f"Variable {arg.name} already exists in the model.")
             self.free_vars[arg.name] = arg
         elif isinstance(arg, Const):
+            if self.free_consts.get(arg.name) is arg:
+                return
             if arg.name in self.free_consts:
                 raise ValueError(f"Constant {arg.name} already exists in the model.")
             self.free_consts[arg.name] = arg
         else:
             raise ValueError(f"Argument {arg} is not a valid model component.")
+        self._add_referenced(arg)
+
+    def _add_referenced(self, *args: "Entity | Process | ChooseProcess | Var | Const"):
+        """Adds the entities and free-standing Vars that the equations of `args` use. A Const without
+        an entity is left out: it may be a process's own, which `induce()` names."""
+        for obj in _referenced(*args):
+            if obj.entity is not None:
+                if self.entities.get(obj.entity.name, obj.entity) is not obj.entity:
+                    raise ValueError(
+                        f"Two different entities are named {obj.entity.name!r}: one in the model, "
+                        f"another one holding {obj.name!r}, used in an equation."
+                    )
+                self.add(obj.entity)
+            elif isinstance(obj, Var):
+                self.add(obj)
 
     @property
     def vars(self) -> "dict[str, Var]":
@@ -636,6 +714,9 @@ class Model:
         into one `InducedModel` per combination. Choices are independent of each other, so this
         is a plain Cartesian product over each choice's option indices.
         """
+        # equations may have changed since add(), e.g. a Var's ode set afterwards
+        self._add_referenced(*self.entities.values(), *self.processes.values(),
+                             *self.pending_process_choices.values(), *self.free_vars.values())
         var_choices = self._open_var_choices()
         var_option_counts = [
             len(getattr(self._lookup_var(entity_name, var_name), attr).options)
@@ -726,9 +807,13 @@ def _induce_single(model: Model) -> "InducedModel":
     named_vars: dict[str, Var] = model.vars
     named_consts: dict[str, Const] = model.consts  # extended below with process-owned consts
 
+    named = {id(const) for const in named_consts.values()}
+
     def collect_process_consts(process: Process, path: str):
         for const_name, const in process.own_consts.items():
-            named_consts[f"{path}.{const_name}"] = const
+            if id(const) not in named:  # one name for a constant that several processes use: the first
+                named_consts[f"{path}.{const_name}"] = const
+                named.add(id(const))
         for sub_process in process.processes:
             collect_process_consts(sub_process, f"{path}.{sub_process.name}")
 
@@ -751,6 +836,18 @@ def _induce_single(model: Model) -> "InducedModel":
         var.ode = _aggregate(exprs, var.aggregation)
     for var, exprs in ae_contributions.values():
         var.algebraic = _aggregate(exprs, var.aggregation)
+
+    # a constant that an equation uses but no entity or process declares is named like a free one
+    known = {id(const) for const in named_consts.values()}
+    for const in _referenced(*named_vars.values()):
+        if isinstance(const, Const) and id(const) not in known:
+            if const.name in named_consts:
+                raise ValueError(
+                    f"Constant {const.name!r} is used in an equation but declared nowhere, and the "
+                    "model already has a constant of that name - add it to a process or an entity."
+                )
+            named_consts[const.name] = const
+            known.add(id(const))
 
     # --- assign a slot in the flat context arrays - only now, since the model is complete ---
     endo_vars = [var for var in named_vars.values() if var.type == "endo"]

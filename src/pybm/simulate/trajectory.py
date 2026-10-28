@@ -1,5 +1,4 @@
 import numpy as np
-from pybm.estimate.int_scipy import minimal_var_ctx
 from pybm.model import Choose, Context, InducedModel
 from scipy.integrate import solve_ivp
 
@@ -45,7 +44,7 @@ def simulate(model: InducedModel, t_eval, context : Context, **kwargs):
     Parameters:
     - model: The induced (indexed) model to simulate - the output of `Model.induce()`.
     - t_eval: Array of time points at which to store the computed solution.
-    - context: A Context object containing the values of constants and variables. If context.vars is None, the initial values of the variables will be set to their default initial values.
+    - context: A Context object containing the values of constants and variables. If context.vars is None, the states start from their declared initial values (algebraic variables need none).
     - kwargs: Additional keyword arguments to pass to the ODE solver (solve_ivp).
 
     Returns:
@@ -74,7 +73,15 @@ def simulate(model: InducedModel, t_eval, context : Context, **kwargs):
     full_size = len(all_vars)  # the shared index space spans every endogenous var, state + algebraic
 
     if initial_var_ctx is None:
-        initial_values_full = minimal_var_ctx(*all_vars, set_initials=True, fixed_lenght=full_size)
+        # declared initial values; only states need one - algebraic variables are re-derived from
+        # the states at every step, and frozen ones are held at their initial value or 0
+        initial_values_full = np.zeros(full_size, dtype=float)
+        for var in state_vars:
+            if var.initial is None:
+                raise ValueError(f"Variable {var.name} is a state but has no initial value.")
+            initial_values_full[var.index_in_ctx] = var.initial
+        for var in frozen_vars:
+            initial_values_full[var.index_in_ctx] = var.initial if var.initial is not None else 0.0
     else:
         initial_values_full = initial_var_ctx
     y0 = np.array([initial_values_full[var.index_in_ctx] for var in state_vars], dtype=float)
