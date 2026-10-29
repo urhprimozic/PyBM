@@ -1,5 +1,12 @@
+# dev folders
+presentation/
+notes/
+literature/
+examples/
+bled/
+
+
 # data
-examples/*
 data/
 src/pybm/benchmark/
 # CMA-ES files
