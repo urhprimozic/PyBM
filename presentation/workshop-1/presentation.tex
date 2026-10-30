@@ -29,6 +29,25 @@
 
 
 \settitlecolor{title_color}
+
+% Code snippets, framed like graphicbox and highlighted by Pygments (minted): \begin{code} ... \end{code},
+% Python and \small by default, or \begin{code}[bash], \begin{code}[python][\scriptsize], and more minted options
+% in a third argument, e.g. [escapeinside=||] for LaTeX between bars: |\textcolor{red}{word}|. The frame needs
+% the [fragile] option: \begin{frame}[fragile]{...}. minted needs the patched latexminted, see .latexmkrc.
+\tcbuselibrary{minted}
+\DeclareTCBListing{code}{ O{python} O{\small} O{} }{
+    listing only,
+    listing engine=minted,
+    minted language=#1,
+    minted style=default,
+    minted options={fontsize=#2, breaklines, breakanywhere=false, autogobble, #3},
+    colframe=graphicbox frame,
+    colback=white,
+    sharp corners,
+    boxrule=1pt,
+    left=1.5mm, right=1.5mm, top=0.5mm, bottom=0.5mm,
+}
+
 \title{Results on PBM-driven ODE discovery and ODE parameter estimation}
 
 \author{Urh Primožič, IJS}
@@ -47,6 +66,11 @@
 }
 
 \begin{frame}{ODE discovery with ProBMoT}
+    \note{\begin{itemize}
+        \item predator-prey : modeling sizes of 2 populations. 2 entities, 3 processes 
+        \item constants: grow rate, ... 
+        \item biological models: hundrets of processes, 10^3 of models 
+    \end{itemize}}
 \begin{itemize}
     \item processes between entities (predator--prey models, \dots)
     \item build a list of possible models $[\vec{x}'(t)=\vec F_i(\vec{x}(t), t, \theta^{(i)})]_i$
@@ -65,16 +89,100 @@
         \end{cases}$
     \end{itemize}
  \end{frame}
- \begin{frame}{PBM syntax}
-    
- \end{frame}
- \begin{frame}{Other speed-ups}
+ \begin{frame}[fragile]{New syntax}
+    \begin{code}[python][\scriptsize]
+predator = Entity(Var("size"))
+prey = Entity(Var("size"))
+x, y = prey["size"], predator["size"]
+r = Const("growth_rate")
+K = Const("K")
+...
+
+exponential = Process(Ode(x, r * x))
+logistic = Process(Ode(x, r * x * (1 - x / K)))
+growth = ChooseProcess(exponential, logistic, name="growth")
+
+predation = Process(Ode(x, -a * x * y), Ode(y, b * x * y - m * y),
+                    name="predation")
+
+models = Model(growth, predation).induce()  
+add_data(data)
+results = estimate_models_collocation(models, t)
+    \end{code}
+   % {\footnotesize one script \;$\cdot$\; constants and entities collected from the equations (\texttt{growth.r}, \texttt{growth.K}) \;$\cdot$\; contributions summed \;$\cdot$\; loops, functions, IDE\par}
+\end{frame}
+ \begin{frame}[fragile]{How this would look in ProBMoT}
+    \begin{code}[text][\scriptsize]
+library LV;  // "inside file LV.pbl"
+template entity Population { vars: size {aggregation: sum}; }
+template process Growth(p: Population) {}
+template process Exponential: Growth {
+  consts: r {range: <0, 5>};
+  equations: td(p.size) = r * p.size; }
+template process Logistic: Growth {
+  consts: r {range: <0, 5>}, K {range: <0, 100>};
+  equations: td(p.size) = r * p.size * (1 - p.size / K); }
+template process Predation(x: Population, y: Population) {
+  consts: a {range: <0, 5>}, b {range: <0, 5>}, m {range: <0, 5>};
+  equations: td(x.size) = -a * x.size * y.size,
+             td(y.size) = b * x.size * y.size - m * y.size; }
+    \end{code}
+    \begin{code}[text][\scriptsize]
+incomplete model LVModel : LV;  // "LVModel.pbm, + a task .xml"
+entity prey : Population { vars: size {role: endogenous; initial: null}; }
+entity pred : Population { vars: size {role: endogenous; initial: null}; }
+process growth(prey) : Growth {}
+process predation(prey, pred) : Predation {}
+    \end{code}
+\end{frame}
+\begin{frame}[fragile]{Templates}
+    \begin{code}[python][\scriptsize]
+def temp_lim(var, env, name):
+    """Temperature limitation of any rate: none, linear or exponential."""
+    T = env["temperature"]
+    refTemp = Const("refTemp", range=(5, 10))
+    theta = Const("theta", range=(1.06, 1.13))
+    return ChooseProcess(
+        Process(Algebraic(var, 1), name="none"),
+        Process(Algebraic(var, T / refTemp), name="linear"),
+        Process(Algebraic(var, theta ** (T - refTemp)), name="exponential"),
+        name=name)
+
+influences = [temp_lim(phyto[f"temp{r}Lim"], env, name=f"temp{r}Influence")
+              for r in ["Growth", "Resp", "Mort", "Exc", "Sed"]]
+    \end{code}
+    \footnotesize
+   % \begin{itemize}
+   %     \setlength{\itemsep}{0.3ex}
+   %     \item a template is a function, a choice is a \texttt{ChooseProcess}
+   %     \item written once, called five times; entities too
+   %     \item only the used constants, named by the slot: \texttt{tempMortInfluence.refTemp}
+   % \end{itemize}
+\end{frame}
+\begin{frame}[fragile]{Templates in ProBMoT}
+    \begin{code}[text][\scriptsize][escapeinside=||]
+// Zurich library: one of five copies (Growth, Resp, Mort, Exc, Sed)
+template process |\textcolor{red}{\textbf{TempMortInfluence}}|(pop : Population, env : Environment) {}
+template process NoTempMortLim : |\textcolor{red}{\textbf{TempMortInfluence}}| {
+  equations: pop.tempRespLim = 1; }   // tempRespLim, not tempMortLim
+template process |\textcolor{title_color}{\textbf{TempMortLim}}| : |\textcolor{red}{\textbf{TempMortInfluence}}| {
+  consts: refTemp {range: <5,10>}, minTemp {range: <0, 6>},
+          optTemp {range: <5, 12>}; }
+template process Linear1TempMortLim : |\textcolor{title_color}{\textbf{TempMortLim}}| {
+  equations: pop.tempRespLim = env.temperature/refTemp; }
+template process ExponentialTempMortLim : |\textcolor{title_color}{\textbf{TempMortLim}}| {
+  consts: theta {range: <1.06, 1.13>};
+  equations: pop.tempRespLim = pow(theta, env.temperature - refTemp); }
+    \end{code}
+    \footnotesize
     \begin{itemize}
-        \item JIT-compiled $F(x,t,\theta)$
-        \item clever structure search 
-        \item precise estimation only for the best candidates
+        \setlength{\itemsep}{0.3ex}
+        \item empty templates \texttt{\{\}} only group alternatives (14 in the library)
+        \item the same family five times, $\approx 45$ lines each
+        \item constants of the parent are fitted in every child, used or not
+        \item copy--paste: the whole \texttt{TempMort} family sets \texttt{tempRespLim}
     \end{itemize}
- \end{frame}
+\end{frame}
  \begin{frame}{Relaxed conditionals}
 \begin{minipage}{.5\textwidth}
 \centering 
@@ -90,6 +198,13 @@
 \begin{minipage}{.5\textwidth}
 \includegraphics[width=\linewidth]{plots/relaxed_conditional.pdf}
 \end{minipage}
+ \end{frame}
+  \begin{frame}{TODOs}
+    \begin{itemize}
+        \item JIT-compiled $F(x,t,\theta)$
+        \item clever structure search 
+        \item precise estimation only for the best candidates
+    \end{itemize}
  \end{frame}
  \begin{frame}{Parameter estimation}
     \begin{itemize}
@@ -117,7 +232,7 @@
 \end{frame}
 \begin{frame}{Integration using multiple shooting\footfullcite{aydogmus2020modifiedmultipleshootingalgorithm}}
         \begin{graphicbox}[boxrule=2pt, title=Multiple shooting] 
-        minimize discrepancy on data
+        find $\theta, s_i$ minimizing discrepancy on data
         $$ \sum_i \mathcal{L}(x_i), \quad \text{where } x_i'=F(x_i,t,\theta), x_i(t_i)=s_i$$
         subject to
         $$
@@ -167,12 +282,12 @@ Derivatives are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$!
         $$
     \end{graphicbox}
 \end{frame}
-\begin{frame}{Collocation\footfullcite{magi}}
+\begin{frame}{Collocation\footfullcite{magi, simultaneous}}
     \begin{itemize}
         \item $x\colon I \to \mathbb{R}^n$ partially observed
         \item choose $l$ \emph{collocation} points $(\tau_1, s_1), (\tau_2, s_2), \dots, (\tau_l, s_l) \in I\times \mathbb{R}^n$  
         \item $\hat x(t)$: interpolant of $(\tau_i, s_i)_{i}$, {\color{gray} hyperparameters $\phi$}
-        \item choose $s=(s_1, \dots, s_l)$ and $\phi$ such that $\hat x(t)$ solves the ODE and matches the data 
+        \item choose $s=(s_1, \dots, s_l)$ and $\phi$ subject to $\hat x(t)$ solves the ODE and matches the data 
     \end{itemize}
 \end{frame}
 \begin{frame}{Collocation}
@@ -189,7 +304,7 @@ Derivatives are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$!
          \hat x(t_i) - y_i
         \|
         $$
-        such that\footnote{Gradient matching. Integral matching can be used as well.} 
+        subject to\footnote{Gradient matching. Integral matching can be used as well.} 
         $$
         \hat x'(t) = F(\hat x(t), t, \theta).
         $$
@@ -244,7 +359,7 @@ Derivatives are noisy $ \propto \frac{1}{|t_{i+1} - t_i|}$!
 $
 \end{frame}
 \begin{frame}
-    \includegraphics[width=\textwidth]{plots/probmot.png}
+    \includegraphics[width=0.9\textwidth]{plots/probmot.png}
 \end{frame}
 \begin{frame}
     \includegraphics[width=\textwidth]{plots/zurich_bled.png}

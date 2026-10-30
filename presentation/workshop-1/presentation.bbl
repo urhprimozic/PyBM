@@ -138,6 +138,63 @@
       \verb https://doi.org/10.1137/0903003
       \endverb
     \endentry
+    \entry{simultaneous}{article}{}{}
+      \name{author}{4}{}{%
+        {{un=0,uniquepart=base,hash=cdd5a539bbf843d843232353db43dd88}{%
+           family={Vasantharajan},
+           familyi={V\bibinitperiod},
+           given={S},
+           giveni={S\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=c42b68b7f16b2b12e88e66032e59d993}{%
+           family={Logsdon},
+           familyi={L\bibinitperiod},
+           given={J},
+           giveni={J\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=b4cf951e494c45f4de462df04ec3b5df}{%
+           family={Biegler},
+           familyi={B\bibinitperiod},
+           given={Lorenz\bibnamedelima T.},
+           giveni={L\bibinitperiod\bibinitdelim T\bibinitperiod},
+           givenun=0}}%
+        {{un=0,uniquepart=base,hash=8d907d0a97ad1fdcc8834676afd8dd14}{%
+           family={Center.},
+           familyi={C\bibinitperiod},
+           given={Carnegie\bibnamedelimb Mellon\bibnamedelimb University.Engineering\bibnamedelimb Design\bibnamedelima Research},
+           giveni={C\bibinitperiod\bibinitdelim M\bibinitperiod\bibinitdelim U\bibinitperiod\bibinitdelim D\bibinitperiod\bibinitdelim R\bibinitperiod},
+           givenun=0}}%
+      }
+      \list{publisher}{1}{%
+        {Carnegie Mellon University}%
+      }
+      \strng{namehash}{924bdd6fb3f712fb820ae450c16ab869}
+      \strng{fullhash}{c4d0e37ebe20eec1df5dcdf7138a34c9}
+      \strng{fullhashraw}{c4d0e37ebe20eec1df5dcdf7138a34c9}
+      \strng{bibnamehash}{924bdd6fb3f712fb820ae450c16ab869}
+      \strng{authorbibnamehash}{924bdd6fb3f712fb820ae450c16ab869}
+      \strng{authornamehash}{924bdd6fb3f712fb820ae450c16ab869}
+      \strng{authorfullhash}{c4d0e37ebe20eec1df5dcdf7138a34c9}
+      \strng{authorfullhashraw}{c4d0e37ebe20eec1df5dcdf7138a34c9}
+      \field{sortinit}{V}
+      \field{sortinithash}{afb52128e5b4dc4b843768c0113d673b}
+      \field{extradatescope}{labelyear}
+      \field{labeldatesource}{}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{Simultaneous strategies for optimization of differential-algebraic systems}
+      \field{year}{1988}
+      \verb{doi}
+      \verb 10.1184/R1/6467471
+      \endverb
+      \verb{urlraw}
+      \verb https://kilthub.cmu.edu/articles/journal_contribution/Simultaneous_strategies_for_optimization_of_differential-algebraic_systems/6467471
+      \endverb
+      \verb{url}
+      \verb https://kilthub.cmu.edu/articles/journal_contribution/Simultaneous_strategies_for_optimization_of_differential-algebraic_systems/6467471
+      \endverb
+      \keyw{Chemical engineering not elsewhere classified}
+    \endentry
     \entry{homotopy}{article}{}{}
       \name{author}{3}{}{%
         {{un=0,uniquepart=base,hash=b96616e885aa5c92d7c07effdfb82763}{%
