@@ -7,6 +7,7 @@
 \usepackage{tikz}
 \usepackage{pgfplots}
 \usepackage{tabularx}
+\usepackage{qrcode}
 \newcolumntype{C}{>{\centering\arraybackslash}X}
 \usepackage[backend=biber, style=authoryear, maxcitenames=2, url=false]{biblatex}
 \addbibresource{references.bib}
@@ -371,5 +372,17 @@ $
     \item \textbf{no good benchmark}
     \item collocation seems to join different approaches together $\rightarrow$ better method?
     \end{itemize}
+\end{frame}
+\begin{frame}
+    \begin{minipage}[t]{0.5\textwidth}
+        \centering
+        \qrcode[height=0.5\textheight]{https://github.com/urhprimozic/PyBM}\\[2ex]
+        \href{https://github.com/urhprimozic/PyBM}{\footnotesize\texttt{github.com/urhprimozic/PyBM}}
+    \end{minipage}%
+    \begin{minipage}[t]{0.5\textwidth}
+        \centering
+        \qrcode[height=0.5\textheight]{https://github.com/urhprimozic/odestimation}\\[2ex]
+        \href{https://github.com/urhprimozic/odestimation}{\footnotesize\texttt{github.com/urhprimozic/odestimation}}
+    \end{minipage}
 \end{frame}
 \end{document}
